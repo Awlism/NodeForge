@@ -23,8 +23,8 @@ class AgentState(str, Enum):
 class NodeAgent:
     """Node agent for communicating with the NodeForge controller.
 
-    The agent handles connection establishment, registration, and
-    authentication with the central controller.
+    The agent handles connection establishment, registration,
+    authentication, and heartbeat communication with the controller.
     """
 
     def __init__(
@@ -59,6 +59,7 @@ class NodeAgent:
         self.transport: Optional[TCPTransport] = None
         self.state = AgentState.DISCONNECTED
         self._running = False
+        self._heartbeat_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         """Start the node agent and connect to the controller.
@@ -82,9 +83,8 @@ class NodeAgent:
                 success = await self._register_and_authenticate()
                 if success:
                     self.state = AgentState.READY
-                    # TODO: Implement heartbeat loop
-                    # For now, keep connection alive
-                    await asyncio.sleep(self.heartbeat_interval_seconds)
+                    # Start heartbeat loop
+                    await self._run_heartbeat_loop()
                 else:
                     self.state = AgentState.ERROR
                     await self.transport.disconnect()
@@ -104,10 +104,19 @@ class NodeAgent:
     async def stop(self) -> None:
         """Stop the node agent and disconnect from the controller.
 
-        Closes the connection and stops all operations.
+        Closes the connection and stops all operations including heartbeat.
         """
         self._running = False
         self.state = AgentState.DISCONNECTED
+
+        # Cancel heartbeat task if running
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self._heartbeat_task = None
 
         if self.transport:
             await self.transport.disconnect()
@@ -182,6 +191,59 @@ class NodeAgent:
 
         except Exception as e:
             return False
+
+    async def _run_heartbeat_loop(self) -> None:
+        """Run the heartbeat loop while connected and authenticated.
+
+        Sends periodic HEARTBEAT messages and validates responses.
+        Exits if connection is lost or authentication fails.
+        """
+        while self._running and self.state == AgentState.READY:
+            try:
+                await asyncio.sleep(self.heartbeat_interval_seconds)
+
+                if not self._running or self.state != AgentState.READY:
+                    break
+
+                # Send HEARTBEAT message
+                heartbeat_message = BaseMessage(
+                    type=MessageType.HEARTBEAT,
+                    message_id=str(uuid.uuid4()),
+                    payload={
+                        "node_id": self.node_id,
+                    },
+                )
+                await self.transport.send(heartbeat_message)
+
+                # Wait for HEARTBEAT_RESPONSE
+                heartbeat_response = await self.transport.receive()
+                if heartbeat_response is None:
+                    # Connection lost
+                    self.state = AgentState.ERROR
+                    break
+
+                if heartbeat_response.type != MessageType.HEARTBEAT_RESPONSE:
+                    # Unexpected message type
+                    self.state = AgentState.ERROR
+                    break
+
+                # Validate response payload
+                payload = heartbeat_response.payload
+                if not isinstance(payload, dict):
+                    self.state = AgentState.ERROR
+                    break
+
+                if payload.get("status") != "ok":
+                    self.state = AgentState.ERROR
+                    break
+
+            except asyncio.CancelledError:
+                # Task cancelled during stop()
+                break
+            except Exception as e:
+                # Connection error or other exception
+                self.state = AgentState.ERROR
+                break
 
     def get_state(self) -> AgentState:
         """Get the current state of the agent.
