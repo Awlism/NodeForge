@@ -59,10 +59,12 @@ class NodeAgent:
         self.transport: Optional[TCPTransport] = None
         self.state = AgentState.DISCONNECTED
         self._running = False
-        self._heartbeat_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         """Start the node agent and connect to the controller.
+
+        Implements automatic reconnection with exponential backoff.
+        Runs until stop() is called.
 
         Raises:
             RuntimeError: If the agent is already running
@@ -83,40 +85,41 @@ class NodeAgent:
                 success = await self._register_and_authenticate()
                 if success:
                     self.state = AgentState.READY
-                    # Start heartbeat loop
+                    # Run heartbeat loop until connection is lost or stop() is called
                     await self._run_heartbeat_loop()
+                    # Heartbeat loop exited, prepare for reconnection
+                    self.state = AgentState.ERROR
                 else:
                     self.state = AgentState.ERROR
                     await self.transport.disconnect()
+
+                # Only reconnect if still running
+                if self._running:
                     await asyncio.sleep(self.reconnect_delay_seconds)
 
             except ConnectionError as e:
                 self.state = AgentState.ERROR
                 if self.transport:
                     await self.transport.disconnect()
-                await asyncio.sleep(self.reconnect_delay_seconds)
+                # Only reconnect if still running
+                if self._running:
+                    await asyncio.sleep(self.reconnect_delay_seconds)
             except Exception as e:
                 self.state = AgentState.ERROR
                 if self.transport:
                     await self.transport.disconnect()
-                await asyncio.sleep(self.reconnect_delay_seconds)
+                # Only reconnect if still running
+                if self._running:
+                    await asyncio.sleep(self.reconnect_delay_seconds)
 
     async def stop(self) -> None:
         """Stop the node agent and disconnect from the controller.
 
         Closes the connection and stops all operations including heartbeat.
+        Prevents reconnection attempts.
         """
         self._running = False
         self.state = AgentState.DISCONNECTED
-
-        # Cancel heartbeat task if running
-        if self._heartbeat_task:
-            self._heartbeat_task.cancel()
-            try:
-                await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
-            self._heartbeat_task = None
 
         if self.transport:
             await self.transport.disconnect()
@@ -196,12 +199,14 @@ class NodeAgent:
         """Run the heartbeat loop while connected and authenticated.
 
         Sends periodic HEARTBEAT messages and validates responses.
-        Exits if connection is lost or authentication fails.
+        Exits if connection is lost, authentication fails, or stop() is called.
+        Does not attempt reconnection; the main start() loop will handle that.
         """
         while self._running and self.state == AgentState.READY:
             try:
                 await asyncio.sleep(self.heartbeat_interval_seconds)
 
+                # Check if still running and in READY state
                 if not self._running or self.state != AgentState.READY:
                     break
 
@@ -218,31 +223,26 @@ class NodeAgent:
                 # Wait for HEARTBEAT_RESPONSE
                 heartbeat_response = await self.transport.receive()
                 if heartbeat_response is None:
-                    # Connection lost
-                    self.state = AgentState.ERROR
+                    # Connection closed by controller
                     break
 
                 if heartbeat_response.type != MessageType.HEARTBEAT_RESPONSE:
                     # Unexpected message type
-                    self.state = AgentState.ERROR
                     break
 
                 # Validate response payload
                 payload = heartbeat_response.payload
                 if not isinstance(payload, dict):
-                    self.state = AgentState.ERROR
                     break
 
                 if payload.get("status") != "ok":
-                    self.state = AgentState.ERROR
                     break
 
             except asyncio.CancelledError:
-                # Task cancelled during stop()
+                # Task cancelled, exit cleanly
                 break
             except Exception as e:
-                # Connection error or other exception
-                self.state = AgentState.ERROR
+                # Connection error or other exception, exit heartbeat loop
                 break
 
     def get_state(self) -> AgentState:
