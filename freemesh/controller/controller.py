@@ -2,7 +2,7 @@
 
 import asyncio
 import uuid
-from typing import Optional
+from typing import Optional, Dict
 
 from freemesh.controller.node_registry import NodeRegistry, NodeState
 from freemesh.protocol.messages import BaseMessage, MessageType
@@ -14,7 +14,7 @@ class Controller:
     """Central controller for managing NodeForge nodes.
     
     The controller listens for incoming node connections, manages node
-    registration, authentication, and heartbeat monitoring.
+    registration, authentication, heartbeat monitoring, and offline detection.
     """
 
     def __init__(
@@ -39,9 +39,15 @@ class Controller:
 
         self.registry = NodeRegistry()
         self.server: Optional[asyncio.Server] = None
+        self._running = False
+        self._offline_detection_task: Optional[asyncio.Task] = None
+        # Map node_id to transport connection for heartbeat responses
+        self._active_nodes: Dict[str, TCPTransport] = {}
 
     async def start(self) -> None:
         """Start the controller and begin listening for node connections.
+
+        Also starts the offline detection loop to monitor node health.
 
         Raises:
             RuntimeError: If the controller is already running
@@ -50,10 +56,16 @@ class Controller:
         if self.server is not None:
             raise RuntimeError("Controller is already running")
 
+        self._running = True
         self.server = await asyncio.start_server(
             self._handle_client_connection,
             self.host,
             self.port,
+        )
+
+        # Start offline detection task
+        self._offline_detection_task = asyncio.create_task(
+            self._run_offline_detection()
         )
 
         async with self.server:
@@ -62,12 +74,31 @@ class Controller:
     async def stop(self) -> None:
         """Stop the controller and close all connections.
 
-        Closes the server socket and any active client connections.
+        Closes the server socket, cancels offline detection, and closes
+        all active client connections.
         """
+        self._running = False
+
+        if self._offline_detection_task:
+            self._offline_detection_task.cancel()
+            try:
+                await self._offline_detection_task
+            except asyncio.CancelledError:
+                pass
+            self._offline_detection_task = None
+
         if self.server is not None:
             self.server.close()
             await self.server.wait_closed()
             self.server = None
+
+        # Clean up active node connections
+        for transport in self._active_nodes.values():
+            try:
+                await transport.disconnect()
+            except Exception:
+                pass
+        self._active_nodes.clear()
 
     async def _handle_client_connection(
         self,
@@ -76,7 +107,7 @@ class Controller:
     ) -> None:
         """Handle an incoming client connection.
 
-        Implements the node lifecycle: registration → authentication.
+        Implements the node lifecycle: registration → authentication → heartbeat.
         Handles message framing and transport protocol.
 
         Args:
@@ -104,13 +135,26 @@ class Controller:
             if auth_message is None:
                 return
 
-            await self._handle_authentication(auth_message, node_id, transport)
+            authenticated = await self._handle_authentication(
+                auth_message, node_id, transport
+            )
+            if not authenticated:
+                # Authentication failed, close connection
+                return
+
+            # Store transport for heartbeat responses
+            self._active_nodes[node_id] = transport
+
+            # Handle heartbeat messages
+            await self._handle_heartbeat_loop(node_id, transport)
 
         except Exception as e:
             # Log error and close connection
             if node_id:
                 self.registry.update_node_state(node_id, NodeState.OFFLINE)
         finally:
+            if node_id and node_id in self._active_nodes:
+                del self._active_nodes[node_id]
             await transport.disconnect()
 
     async def _handle_registration(
@@ -198,7 +242,7 @@ class Controller:
         message: BaseMessage,
         node_id: str,
         transport: TCPTransport,
-    ) -> None:
+    ) -> bool:
         """Handle node authentication.
 
         Validates the AUTHENTICATE message and authenticates the node
@@ -208,6 +252,9 @@ class Controller:
             message: The received BaseMessage
             node_id: The registered node ID
             transport: The transport connection
+
+        Returns:
+            True if authentication was successful, False otherwise
         """
         # Validate message type
         if message.type != MessageType.AUTHENTICATE:
@@ -218,7 +265,7 @@ class Controller:
             )
             await transport.send(error_response)
             self.registry.update_node_state(node_id, NodeState.AUTH_FAILED)
-            return
+            return False
 
         # Extract credentials from payload
         payload = message.payload
@@ -230,7 +277,7 @@ class Controller:
             )
             await transport.send(error_response)
             self.registry.update_node_state(node_id, NodeState.AUTH_FAILED)
-            return
+            return False
 
         credentials = payload.get("token") or payload.get("credentials")
 
@@ -243,7 +290,7 @@ class Controller:
             )
             await transport.send(error_response)
             self.registry.update_node_state(node_id, NodeState.AUTH_FAILED)
-            return
+            return False
 
         try:
             # Perform authentication
@@ -257,6 +304,7 @@ class Controller:
                     payload={"status": "authenticated", "node_id": node_id},
                 )
                 await transport.send(response)
+                return True
             else:
                 # Authentication failed
                 self.registry.authenticate_node(node_id, authenticated=False)
@@ -267,6 +315,7 @@ class Controller:
                     payload={"status": "failed", "error": "Invalid credentials"},
                 )
                 await transport.send(error_response)
+                return False
 
         except AuthenticationError as e:
             # Authentication error (e.g., invalid format)
@@ -278,3 +327,83 @@ class Controller:
                 payload={"status": "failed", "error": str(e)},
             )
             await transport.send(error_response)
+            return False
+
+    async def _handle_heartbeat_loop(
+        self,
+        node_id: str,
+        transport: TCPTransport,
+    ) -> None:
+        """Handle incoming heartbeat messages from an authenticated node.
+
+        Runs until the connection is closed or an error occurs.
+        Records heartbeats and responds with HEARTBEAT_RESPONSE.
+
+        Args:
+            node_id: The authenticated node ID
+            transport: The transport connection
+        """
+        while self._running:
+            try:
+                message = await transport.receive()
+                if message is None:
+                    # Connection closed by node
+                    break
+
+                if message.type != MessageType.HEARTBEAT:
+                    # Unexpected message type during heartbeat phase
+                    break
+
+                # Validate heartbeat payload
+                payload = message.payload
+                if not isinstance(payload, dict):
+                    break
+
+                if payload.get("node_id") != node_id:
+                    # Heartbeat from different node ID
+                    break
+
+                # Record heartbeat in registry
+                self.registry.record_heartbeat(node_id)
+
+                # Send HEARTBEAT_RESPONSE
+                response = BaseMessage(
+                    type=MessageType.HEARTBEAT_RESPONSE,
+                    message_id=str(uuid.uuid4()),
+                    payload={"status": "ok", "node_id": node_id},
+                )
+                await transport.send(response)
+
+            except Exception as e:
+                # Connection error or transport failure, exit heartbeat loop
+                break
+
+    async def _run_offline_detection(self) -> None:
+        """Run the offline node detection loop.
+
+        Periodically scans the registry for nodes that have exceeded
+        the heartbeat timeout and marks them as OFFLINE.
+        Runs at half the heartbeat_timeout_seconds interval.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(self.heartbeat_timeout_seconds / 2)
+
+                if not self._running:
+                    break
+
+                # Detect offline nodes
+                offline_nodes = self.registry.detect_offline_nodes(
+                    self.heartbeat_timeout_seconds
+                )
+
+                # Mark detected offline nodes
+                for node_info in offline_nodes:
+                    self.registry.mark_offline(node_info.node_id)
+
+            except asyncio.CancelledError:
+                # Task cancelled during stop()
+                break
+            except Exception as e:
+                # Log error and continue detection loop
+                pass
