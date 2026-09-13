@@ -195,7 +195,7 @@ async def test_node_reconnection():
                     and node.state == NodeState.ONLINE
                     and agent.get_state() == AgentState.READY
                     and agent.transport is not None
-                    and agent.transport.is_connected()
+                    and await agent.transport.is_connected()
                 ):
                     reconnected = True
                     break
