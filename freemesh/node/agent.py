@@ -352,9 +352,23 @@ class NodeAgent:
                         0,
                     )
 
-                    if restart_attempts >= self._max_service_restart_attempts:
-                        
-                        continue
+if restart_attempts >= self._max_service_restart_attempts:
+    if self.transport is not None:
+        failure_message = BaseMessage(
+            type=MessageType.SERVICE_FAILURE,
+            message_id=str(uuid.uuid4()),
+            payload={
+                "service_id": service_id,
+                "status": "crashed",
+                "restart_attempts": restart_attempts,
+                "max_restart_attempts": self._max_service_restart_attempts,
+                "reason": "maximum restart attempts reached",
+            },
+        )
+
+        await self.transport.send(failure_message)
+
+    continue
 
                     command = self._service_commands.get(service_id)
 
