@@ -21,11 +21,7 @@ class AgentState(str, Enum):
 
 
 class NodeAgent:
-    """Node agent for communicating with the NodeForge controller.
-
-    The agent handles connection establishment, registration,
-    authentication, and heartbeat communication with the controller.
-    """
+    """Node agent for communicating with the NodeForge controller."""
 
     def __init__(
         self,
@@ -37,17 +33,6 @@ class NodeAgent:
         heartbeat_interval_seconds: float = 10.0,
         reconnect_delay_seconds: float = 5.0,
     ):
-        """Initialize the node agent.
-
-        Args:
-            node_id: Unique identifier for this node
-            hostname: Hostname or name of this node
-            controller_host: Host address of the controller
-            controller_port: Port of the controller
-            authentication_token: Token for authentication with controller
-            heartbeat_interval_seconds: Seconds between heartbeat messages
-            reconnect_delay_seconds: Seconds to wait before reconnection attempt
-        """
         self.node_id = node_id
         self.hostname = hostname
         self.controller_host = controller_host
@@ -60,15 +45,14 @@ class NodeAgent:
         self.state = AgentState.DISCONNECTED
         self._running = False
 
+        self._receiver_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._response_waiters: dict[str, asyncio.Future] = {}
+        self._services: dict[str, asyncio.subprocess.Process] = {}
+
     async def start(self) -> None:
-        """Start the node agent and connect to the controller.
+        """Start the node agent and connect to the controller."""
 
-        Implements automatic reconnection with exponential backoff.
-        Runs until stop() is called.
-
-        Raises:
-            RuntimeError: If the agent is already running
-        """
         if self._running:
             raise RuntimeError("Node agent is already running")
 
@@ -77,66 +61,120 @@ class NodeAgent:
 
         while self._running:
             try:
-                # Connect to controller
                 self.transport = TCPTransport()
-                await self.transport.connect(self.controller_host, self.controller_port)
 
-                # Perform registration and authentication
+                await self.transport.connect(
+                    self.controller_host,
+                    self.controller_port,
+                )
+
                 success = await self._register_and_authenticate()
-                if success:
-                    self.state = AgentState.READY
-                    # Run heartbeat loop until connection is lost or stop() is called
-                    await self._run_heartbeat_loop()
-                    # Heartbeat loop exited, prepare for reconnection
-                    self.state = AgentState.ERROR
-                else:
+
+                if not success:
                     self.state = AgentState.ERROR
                     await self.transport.disconnect()
 
-                # Only reconnect if still running
+                    if self._running:
+                        await asyncio.sleep(self.reconnect_delay_seconds)
+
+                    continue
+
+                self.state = AgentState.READY
+
+                self._receiver_task = asyncio.create_task(
+                    self._receive_loop()
+                )
+
+                self._heartbeat_task = asyncio.create_task(
+                    self._heartbeat_loop()
+                )
+
+                done, pending = await asyncio.wait(
+                    [
+                        self._receiver_task,
+                        self._heartbeat_task,
+                    ],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                for task in pending:
+                    task.cancel()
+
+                for task in pending:
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+                self._receiver_task = None
+                self._heartbeat_task = None
+
+                if self._running:
+                    self.state = AgentState.ERROR
+
+                    if self.transport:
+                        await self.transport.disconnect()
+
+                    await asyncio.sleep(self.reconnect_delay_seconds)
+
+            except Exception:
+                self.state = AgentState.ERROR
+
+                if self.transport:
+                    await self.transport.disconnect()
+
                 if self._running:
                     await asyncio.sleep(self.reconnect_delay_seconds)
 
-            except ConnectionError as e:
-                self.state = AgentState.ERROR
-                if self.transport:
-                    await self.transport.disconnect()
-                # Only reconnect if still running
-                if self._running:
-                    await asyncio.sleep(self.reconnect_delay_seconds)
-            except Exception as e:
-                self.state = AgentState.ERROR
-                if self.transport:
-                    await self.transport.disconnect()
-                # Only reconnect if still running
-                if self._running:
-                    await asyncio.sleep(self.reconnect_delay_seconds)
+        self.state = AgentState.DISCONNECTED
 
     async def stop(self) -> None:
-        """Stop the node agent and disconnect from the controller.
+        """Stop the node agent and disconnect from the controller."""
 
-        Closes the connection and stops all operations including heartbeat.
-        Prevents reconnection attempts.
-        """
         self._running = False
         self.state = AgentState.DISCONNECTED
+
+        for task in (
+            self._receiver_task,
+            self._heartbeat_task,
+        ):
+            if task and not task.done():
+                task.cancel()
+
+        for task in (
+            self._receiver_task,
+            self._heartbeat_task,
+        ):
+            if task:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        self._receiver_task = None
+        self._heartbeat_task = None
+
+        await self._stop_all_services()
+
+        for future in self._response_waiters.values():
+            if not future.done():
+                future.cancel()
+
+        self._response_waiters.clear()
 
         if self.transport:
             await self.transport.disconnect()
             self.transport = None
 
     async def _register_and_authenticate(self) -> bool:
-        """Perform registration and authentication with the controller.
+        """Perform registration and authentication with the controller."""
 
-        Returns:
-            True if successful, False otherwise
-        """
         if self.transport is None:
             return False
 
         try:
-            # Step 1: Send REGISTER message
             self.state = AgentState.REGISTERING
+
             register_message = BaseMessage(
                 type=MessageType.REGISTER,
                 message_id=str(uuid.uuid4()),
@@ -145,26 +183,27 @@ class NodeAgent:
                     "hostname": self.hostname,
                 },
             )
+
             await self.transport.send(register_message)
 
-            # Step 2: Wait for REGISTER_RESPONSE
             register_response = await self.transport.receive()
+
             if register_response is None:
                 return False
 
             if register_response.type != MessageType.REGISTER_RESPONSE:
                 return False
 
-            # Verify response payload
             payload = register_response.payload
+
             if not isinstance(payload, dict):
                 return False
 
             if payload.get("status") != "registered":
                 return False
 
-            # Step 3: Send AUTHENTICATE message
             self.state = AgentState.AUTHENTICATING
+
             auth_message = BaseMessage(
                 type=MessageType.AUTHENTICATE,
                 message_id=str(uuid.uuid4()),
@@ -172,18 +211,19 @@ class NodeAgent:
                     "token": self.authentication_token,
                 },
             )
+
             await self.transport.send(auth_message)
 
-            # Step 4: Wait for AUTHENTICATE_RESPONSE
             auth_response = await self.transport.receive()
+
             if auth_response is None:
                 return False
 
             if auth_response.type != MessageType.AUTHENTICATE_RESPONSE:
                 return False
 
-            # Verify response payload
             payload = auth_response.payload
+
             if not isinstance(payload, dict):
                 return False
 
@@ -192,79 +232,246 @@ class NodeAgent:
 
             return True
 
-        except Exception as e:
+        except Exception:
             return False
 
-    async def _run_heartbeat_loop(self) -> None:
-        """Run the heartbeat loop while connected and authenticated.
+    async def _receive_loop(self) -> None:
+        """Receive and dispatch messages from the controller."""
 
-        Sends periodic HEARTBEAT messages and validates responses.
-        Exits if connection is lost, authentication fails, or stop() is called.
-        Does not attempt reconnection; the main start() loop will handle that.
-        """
+        while self._running and self.state == AgentState.READY:
+            try:
+                if self.transport is None:
+                    return
+
+                message = await self.transport.receive()
+
+                if message is None:
+                    return
+
+                if message.type == MessageType.HEARTBEAT_RESPONSE:
+                    self._resolve_response(message)
+                    continue
+
+                if message.type == MessageType.SERVICE_START:
+                    await self._handle_service_start(message)
+                    continue
+
+                if message.type == MessageType.SERVICE_STOP:
+                    await self._handle_service_stop(message)
+                    continue
+
+                self._resolve_response(message)
+
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                return
+
+    async def _heartbeat_loop(self) -> None:
+        """Send periodic heartbeat messages."""
+
         while self._running and self.state == AgentState.READY:
             try:
                 await asyncio.sleep(self.heartbeat_interval_seconds)
 
-                # Check if still running and in READY state
                 if not self._running or self.state != AgentState.READY:
-                    break
+                    return
 
-                # Send HEARTBEAT message
+                if self.transport is None:
+                    return
+
+                message_id = str(uuid.uuid4())
+
                 heartbeat_message = BaseMessage(
                     type=MessageType.HEARTBEAT,
-                    message_id=str(uuid.uuid4()),
+                    message_id=message_id,
                     payload={
                         "node_id": self.node_id,
                     },
                 )
+
                 await self.transport.send(heartbeat_message)
 
-                # Wait for HEARTBEAT_RESPONSE
-                heartbeat_response = await self.transport.receive()
-                if heartbeat_response is None:
-                    # Connection closed by controller
-                    break
-
-                if heartbeat_response.type != MessageType.HEARTBEAT_RESPONSE:
-                    # Unexpected message type
-                    break
-
-                # Validate response payload
-                payload = heartbeat_response.payload
-                if not isinstance(payload, dict):
-                    break
-
-                if payload.get("status") != "ok":
-                    break
-
             except asyncio.CancelledError:
-                # Task cancelled, exit cleanly
-                break
-            except Exception as e:
-                # Connection error or other exception, exit heartbeat loop
-                break
+                return
+            except Exception:
+                return
+
+    def _resolve_response(self, message: BaseMessage) -> None:
+        """Resolve a pending response future."""
+
+        future = self._response_waiters.pop(
+            message.message_id,
+            None,
+        )
+
+        if future and not future.done():
+            future.set_result(message)
+
+    async def _handle_service_start(
+        self,
+        message: BaseMessage,
+    ) -> None:
+        """Handle a request to start a service."""
+
+        if self.transport is None:
+            return
+
+        payload = message.payload
+
+        if not isinstance(payload, dict):
+            return
+
+        service_id = payload.get("service_id")
+        command = payload.get("command")
+
+        if not service_id or not command:
+            response = BaseMessage(
+                type=MessageType.SERVICE_START_RESPONSE,
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "service_id": service_id,
+                    "status": "error",
+                    "error": "service_id and command are required",
+                },
+            )
+
+            await self.transport.send(response)
+            return
+
+        if service_id in self._services:
+            process = self._services[service_id]
+
+            if process.returncode is None:
+                response = BaseMessage(
+                    type=MessageType.SERVICE_START_RESPONSE,
+                    message_id=str(uuid.uuid4()),
+                    payload={
+                        "service_id": service_id,
+                        "status": "already_running",
+                    },
+                )
+
+                await self.transport.send(response)
+                return
+
+            del self._services[service_id]
+
+        try:
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+
+            self._services[service_id] = process
+
+            response = BaseMessage(
+                type=MessageType.SERVICE_START_RESPONSE,
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "service_id": service_id,
+                    "status": "started",
+                    "pid": process.pid,
+                },
+            )
+
+        except Exception as exc:
+            response = BaseMessage(
+                type=MessageType.SERVICE_START_RESPONSE,
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "service_id": service_id,
+                    "status": "error",
+                    "error": str(exc),
+                },
+            )
+
+        await self.transport.send(response)
+
+    async def _handle_service_stop(
+        self,
+        message: BaseMessage,
+    ) -> None:
+        """Handle a request to stop a service."""
+
+        if self.transport is None:
+            return
+
+        payload = message.payload
+
+        if not isinstance(payload, dict):
+            return
+
+        service_id = payload.get("service_id")
+
+        if not service_id:
+            return
+
+        process = self._services.get(service_id)
+
+        if process is None:
+            status = "not_running"
+        elif process.returncode is not None:
+            self._services.pop(service_id, None)
+            status = "not_running"
+        else:
+            process.terminate()
+
+            try:
+                await asyncio.wait_for(
+                    process.wait(),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+
+            self._services.pop(service_id, None)
+            status = "stopped"
+
+        response = BaseMessage(
+            type=MessageType.SERVICE_STOP_RESPONSE,
+            message_id=str(uuid.uuid4()),
+            payload={
+                "service_id": service_id,
+                "status": status,
+            },
+        )
+
+        await self.transport.send(response)
+
+    async def _stop_all_services(self) -> None:
+        """Stop all services managed by this node."""
+
+        for service_id, process in list(self._services.items()):
+            if process.returncode is None:
+                try:
+                    process.terminate()
+
+                    await asyncio.wait_for(
+                        process.wait(),
+                        timeout=5.0,
+                    )
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+                except Exception:
+                    pass
+
+            self._services.pop(service_id, None)
 
     def get_state(self) -> AgentState:
-        """Get the current state of the agent.
+        """Get the current state of the agent."""
 
-        Returns:
-            Current AgentState
-        """
         return self.state
 
     def is_connected(self) -> bool:
-        """Check if the agent is connected and authenticated.
+        """Check if the agent is connected and authenticated."""
 
-        Returns:
-            True if in READY state, False otherwise
-        """
         return self.state == AgentState.READY
 
     def is_running(self) -> bool:
-        """Check if the agent is currently running.
+        """Check if the agent is currently running."""
 
-        Returns:
-            True if running, False otherwise
-        """
         return self._running
