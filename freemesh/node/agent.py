@@ -47,8 +47,11 @@ class NodeAgent:
 
         self._receiver_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._service_monitor_task: Optional[asyncio.Task] = None
+
         self._response_waiters: dict[str, asyncio.Future] = {}
         self._services: dict[str, asyncio.subprocess.Process] = {}
+        self._service_statuses: dict[str, str] = {}
 
     async def start(self) -> None:
         """Start the node agent and connect to the controller."""
@@ -75,7 +78,9 @@ class NodeAgent:
                     await self.transport.disconnect()
 
                     if self._running:
-                        await asyncio.sleep(self.reconnect_delay_seconds)
+                        await asyncio.sleep(
+                            self.reconnect_delay_seconds
+                        )
 
                     continue
 
@@ -89,10 +94,15 @@ class NodeAgent:
                     self._heartbeat_loop()
                 )
 
+                self._service_monitor_task = asyncio.create_task(
+                    self._service_monitor_loop()
+                )
+
                 done, pending = await asyncio.wait(
                     [
                         self._receiver_task,
                         self._heartbeat_task,
+                        self._service_monitor_task,
                     ],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
@@ -108,6 +118,7 @@ class NodeAgent:
 
                 self._receiver_task = None
                 self._heartbeat_task = None
+                self._service_monitor_task = None
 
                 if self._running:
                     self.state = AgentState.ERROR
@@ -115,7 +126,9 @@ class NodeAgent:
                     if self.transport:
                         await self.transport.disconnect()
 
-                    await asyncio.sleep(self.reconnect_delay_seconds)
+                    await asyncio.sleep(
+                        self.reconnect_delay_seconds
+                    )
 
             except Exception:
                 self.state = AgentState.ERROR
@@ -124,7 +137,9 @@ class NodeAgent:
                     await self.transport.disconnect()
 
                 if self._running:
-                    await asyncio.sleep(self.reconnect_delay_seconds)
+                    await asyncio.sleep(
+                        self.reconnect_delay_seconds
+                    )
 
         self.state = AgentState.DISCONNECTED
 
@@ -137,6 +152,7 @@ class NodeAgent:
         for task in (
             self._receiver_task,
             self._heartbeat_task,
+            self._service_monitor_task,
         ):
             if task and not task.done():
                 task.cancel()
@@ -144,6 +160,7 @@ class NodeAgent:
         for task in (
             self._receiver_task,
             self._heartbeat_task,
+            self._service_monitor_task,
         ):
             if task:
                 try:
@@ -153,6 +170,7 @@ class NodeAgent:
 
         self._receiver_task = None
         self._heartbeat_task = None
+        self._service_monitor_task = None
 
         await self._stop_all_services()
 
@@ -268,6 +286,7 @@ class NodeAgent:
 
             except asyncio.CancelledError:
                 return
+
             except Exception:
                 return
 
@@ -276,7 +295,9 @@ class NodeAgent:
 
         while self._running and self.state == AgentState.READY:
             try:
-                await asyncio.sleep(self.heartbeat_interval_seconds)
+                await asyncio.sleep(
+                    self.heartbeat_interval_seconds
+                )
 
                 if not self._running or self.state != AgentState.READY:
                     return
@@ -298,8 +319,35 @@ class NodeAgent:
 
             except asyncio.CancelledError:
                 return
+
             except Exception:
                 return
+
+    async def _service_monitor_loop(self) -> None:
+        """Monitor managed services and detect unexpected exits."""
+
+        while self._running and self.state == AgentState.READY:
+            try:
+                await asyncio.sleep(0.2)
+
+                for service_id, process in list(
+                    self._services.items()
+                ):
+                    if process.returncode is None:
+                        continue
+
+                    current_status = self._service_statuses.get(
+                        service_id
+                    )
+
+                    if current_status == "running":
+                        self._service_statuses[service_id] = "crashed"
+
+            except asyncio.CancelledError:
+                return
+
+            except Exception:
+                continue
 
     def _resolve_response(self, message: BaseMessage) -> None:
         """Resolve a pending response future."""
@@ -362,7 +410,8 @@ class NodeAgent:
                 await self.transport.send(response)
                 return
 
-            del self._services[service_id]
+            self._services.pop(service_id, None)
+            self._service_statuses.pop(service_id, None)
 
         try:
             process = await asyncio.create_subprocess_shell(
@@ -372,6 +421,7 @@ class NodeAgent:
             )
 
             self._services[service_id] = process
+            self._service_statuses[service_id] = "running"
 
             response = BaseMessage(
                 type=MessageType.SERVICE_START_RESPONSE,
@@ -422,9 +472,12 @@ class NodeAgent:
 
         if process is None:
             status = "not_running"
+
         elif process.returncode is not None:
             self._services.pop(service_id, None)
+            self._service_statuses.pop(service_id, None)
             status = "not_running"
+
         else:
             process.terminate()
 
@@ -438,6 +491,7 @@ class NodeAgent:
                 await process.wait()
 
             self._services.pop(service_id, None)
+            self._service_statuses.pop(service_id, None)
             status = "stopped"
 
         response = BaseMessage(
@@ -490,12 +544,11 @@ class NodeAgent:
             status = "not_found"
             pid = None
 
-        elif process.returncode is None:
-            status = "running"
-            pid = process.pid
-
         else:
-            status = "stopped"
+            status = self._service_statuses.get(
+                service_id,
+                "running" if process.returncode is None else "stopped",
+            )
             pid = process.pid
 
         response = BaseMessage(
@@ -514,7 +567,9 @@ class NodeAgent:
     async def _stop_all_services(self) -> None:
         """Stop all services managed by this node."""
 
-        for service_id, process in list(self._services.items()):
+        for service_id, process in list(
+            self._services.items()
+        ):
             if process.returncode is None:
                 try:
                     process.terminate()
@@ -523,13 +578,16 @@ class NodeAgent:
                         process.wait(),
                         timeout=5.0,
                     )
+
                 except asyncio.TimeoutError:
                     process.kill()
                     await process.wait()
+
                 except Exception:
                     pass
 
             self._services.pop(service_id, None)
+            self._service_statuses.pop(service_id, None)
 
     def get_state(self) -> AgentState:
         """Get the current state of the agent."""
