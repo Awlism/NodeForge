@@ -50,8 +50,11 @@ class NodeAgent:
         self._service_monitor_task: Optional[asyncio.Task] = None
 
         self._response_waiters: dict[str, asyncio.Future] = {}
+
         self._services: dict[str, asyncio.subprocess.Process] = {}
+        self._service_commands: dict[str, str] = {}
         self._service_statuses: dict[str, str] = {}
+        self._service_restart_attempts: dict[str, int] = {}
 
     async def start(self) -> None:
         """Start the node agent and connect to the controller."""
@@ -305,11 +308,9 @@ class NodeAgent:
                 if self.transport is None:
                     return
 
-                message_id = str(uuid.uuid4())
-
                 heartbeat_message = BaseMessage(
                     type=MessageType.HEARTBEAT,
-                    message_id=message_id,
+                    message_id=str(uuid.uuid4()),
                     payload={
                         "node_id": self.node_id,
                     },
@@ -324,7 +325,7 @@ class NodeAgent:
                 return
 
     async def _service_monitor_loop(self) -> None:
-        """Monitor managed services and detect unexpected exits."""
+        """Monitor services and restart each crashed service once."""
 
         while self._running and self.state == AgentState.READY:
             try:
@@ -340,7 +341,41 @@ class NodeAgent:
                         service_id
                     )
 
-                    if current_status == "running":
+                    if current_status != "running":
+                        continue
+
+                    self._service_statuses[service_id] = "crashed"
+
+                    restart_attempts = self._service_restart_attempts.get(
+                        service_id,
+                        0,
+                    )
+
+                    if restart_attempts >= 1:
+                        continue
+
+                    command = self._service_commands.get(service_id)
+
+                    if not command:
+                        continue
+
+                    self._service_restart_attempts[service_id] = (
+                        restart_attempts + 1
+                    )
+
+                    try:
+                        restarted_process = (
+                            await asyncio.create_subprocess_shell(
+                                command,
+                                stdout=asyncio.subprocess.DEVNULL,
+                                stderr=asyncio.subprocess.DEVNULL,
+                            )
+                        )
+
+                        self._services[service_id] = restarted_process
+                        self._service_statuses[service_id] = "running"
+
+                    except Exception:
                         self._service_statuses[service_id] = "crashed"
 
             except asyncio.CancelledError:
@@ -421,7 +456,9 @@ class NodeAgent:
             )
 
             self._services[service_id] = process
+            self._service_commands[service_id] = command
             self._service_statuses[service_id] = "running"
+            self._service_restart_attempts[service_id] = 0
 
             response = BaseMessage(
                 type=MessageType.SERVICE_START_RESPONSE,
@@ -475,10 +512,14 @@ class NodeAgent:
 
         elif process.returncode is not None:
             self._services.pop(service_id, None)
+            self._service_commands.pop(service_id, None)
             self._service_statuses.pop(service_id, None)
+            self._service_restart_attempts.pop(service_id, None)
             status = "not_running"
 
         else:
+            self._service_statuses[service_id] = "stopping"
+
             process.terminate()
 
             try:
@@ -491,7 +532,10 @@ class NodeAgent:
                 await process.wait()
 
             self._services.pop(service_id, None)
+            self._service_commands.pop(service_id, None)
             self._service_statuses.pop(service_id, None)
+            self._service_restart_attempts.pop(service_id, None)
+
             status = "stopped"
 
         response = BaseMessage(
@@ -587,7 +631,9 @@ class NodeAgent:
                     pass
 
             self._services.pop(service_id, None)
+            self._service_commands.pop(service_id, None)
             self._service_statuses.pop(service_id, None)
+            self._service_restart_attempts.pop(service_id, None)
 
     def get_state(self) -> AgentState:
         """Get the current state of the agent."""
