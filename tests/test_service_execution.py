@@ -94,6 +94,31 @@ async def cleanup_test_controller_and_agent(
         pass
 
 
+async def wait_for_service_status(
+    controller,
+    service_id,
+    expected_status,
+    timeout=2.0,
+):
+    deadline = asyncio.get_running_loop().time() + timeout
+
+    while asyncio.get_running_loop().time() < deadline:
+        response = await controller.status_service(
+            node_id="service-node",
+            service_id=service_id,
+        )
+
+        if response.payload.get("status") == expected_status:
+            return response
+
+        await asyncio.sleep(0.1)
+
+    return await controller.status_service(
+        node_id="service-node",
+        service_id=service_id,
+    )
+
+
 @pytest.mark.asyncio
 async def test_service_start_command():
     controller, server_task, agent, agent_task = (
@@ -173,6 +198,54 @@ async def test_service_status_command():
             == "status-service"
         )
         assert final_status_response.payload["status"] == "not_found"
+
+    finally:
+        await cleanup_test_controller_and_agent(
+            controller,
+            server_task,
+            agent,
+            agent_task,
+        )
+
+
+@pytest.mark.asyncio
+async def test_service_crash_and_auto_restart():
+    controller, server_task, agent, agent_task = (
+        await create_test_controller_and_agent()
+    )
+
+    try:
+        response = await controller.start_service(
+            node_id="service-node",
+            service_id="crash-service",
+            command='python -c "import sys; sys.exit(1)"',
+        )
+
+        assert response is not None
+        assert response.type == MessageType.SERVICE_START_RESPONSE
+        assert response.payload["service_id"] == "crash-service"
+        assert response.payload["status"] == "started"
+
+        restarted_response = await wait_for_service_status(
+            controller,
+            "crash-service",
+            "running",
+            timeout=2.0,
+        )
+
+        assert restarted_response.type == MessageType.SERVICE_STATUS_RESPONSE
+        assert restarted_response.payload["status"] == "running"
+        assert restarted_response.payload["pid"] is not None
+
+        crashed_response = await wait_for_service_status(
+            controller,
+            "crash-service",
+            "crashed",
+            timeout=2.0,
+        )
+
+        assert crashed_response.type == MessageType.SERVICE_STATUS_RESPONSE
+        assert crashed_response.payload["status"] == "crashed"
 
     finally:
         await cleanup_test_controller_and_agent(
