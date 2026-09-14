@@ -392,6 +392,7 @@ class Controller:
                 elif message.type in (
                     MessageType.SERVICE_START_RESPONSE,
                     MessageType.SERVICE_STOP_RESPONSE,
+                    MessageType.SERVICE_STATUS_RESPONSE,
                 ):
                     self._store_service_response(message)
 
@@ -399,7 +400,6 @@ class Controller:
                     self._store_service_response(message)
 
                 else:
-                    # Ignore unsupported messages for now.
                     continue
 
             except asyncio.CancelledError:
@@ -557,6 +557,63 @@ class Controller:
             if response is None:
                 raise RuntimeError(
                     "Service stop response was not received"
+                )
+
+            return response
+
+        finally:
+            self._service_response_events.pop(
+                request_id,
+                None,
+            )
+            self._service_responses.pop(
+                request_id,
+                None,
+            )
+
+    async def status_service(
+        self,
+        node_id: str,
+        service_id: str,
+        timeout_seconds: float = 10.0,
+    ) -> BaseMessage:
+        """Request the current status of a service."""
+
+        transport = self._active_nodes.get(node_id)
+
+        if transport is None:
+            raise RuntimeError(
+                f"Node {node_id} is not connected"
+            )
+
+        request_id = str(uuid.uuid4())
+
+        event = asyncio.Event()
+
+        self._service_response_events[request_id] = event
+
+        message = BaseMessage(
+            type=MessageType.SERVICE_STATUS,
+            message_id=request_id,
+            payload={
+                "service_id": service_id,
+                "request_id": request_id,
+            },
+        )
+
+        try:
+            await transport.send(message)
+
+            await asyncio.wait_for(
+                event.wait(),
+                timeout=timeout_seconds,
+            )
+
+            response = self._service_responses.get(request_id)
+
+            if response is None:
+                raise RuntimeError(
+                    "Service status response was not received"
                 )
 
             return response
