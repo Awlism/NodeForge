@@ -260,6 +260,10 @@ class NodeAgent:
                     await self._handle_service_stop(message)
                     continue
 
+                if message.type == MessageType.SERVICE_STATUS:
+                    await self._handle_service_status(message)
+                    continue
+
                 self._resolve_response(message)
 
             except asyncio.CancelledError:
@@ -443,6 +447,65 @@ class NodeAgent:
                 "service_id": service_id,
                 "request_id": request_id,
                 "status": status,
+            },
+        )
+
+        await self.transport.send(response)
+
+    async def _handle_service_status(
+        self,
+        message: BaseMessage,
+    ) -> None:
+        """Handle a request to check the status of a service."""
+
+        if self.transport is None:
+            return
+
+        payload = message.payload
+
+        if not isinstance(payload, dict):
+            return
+
+        service_id = payload.get("service_id")
+        request_id = payload.get("request_id") or message.message_id
+
+        if not service_id:
+            response = BaseMessage(
+                type=MessageType.SERVICE_STATUS_RESPONSE,
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "service_id": service_id,
+                    "request_id": request_id,
+                    "status": "error",
+                    "error": "service_id is required",
+                },
+            )
+
+            await self.transport.send(response)
+            return
+
+        process = self._services.get(service_id)
+
+        if process is None:
+            status = "not_found"
+            pid = None
+
+        elif process.returncode is None:
+            status = "running"
+            pid = process.pid
+
+        else:
+            status = "stopped"
+            pid = process.pid
+
+        response = BaseMessage(
+            type=MessageType.SERVICE_STATUS_RESPONSE,
+            message_id=str(uuid.uuid4()),
+            payload={
+                "service_id": service_id,
+                "request_id": request_id,
+                "status": status,
+                "pid": pid,
             },
         )
 
