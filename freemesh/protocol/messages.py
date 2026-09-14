@@ -18,6 +18,12 @@ class MessageType(str, Enum):
     AUTHENTICATE_RESPONSE = "authenticate_response"
     HEARTBEAT = "heartbeat"
     HEARTBEAT_RESPONSE = "heartbeat_response"
+
+    SERVICE_START = "service_start"
+    SERVICE_START_RESPONSE = "service_start_response"
+    SERVICE_STOP = "service_stop"
+    SERVICE_STOP_RESPONSE = "service_stop_response"
+
     STATUS = "status"
     ERROR = "error"
     DISCONNECT = "disconnect"
