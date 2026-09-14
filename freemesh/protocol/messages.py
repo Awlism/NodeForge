@@ -25,6 +25,8 @@ class MessageType(str, Enum):
     SERVICE_STOP_RESPONSE = "service_stop_response"
     SERVICE_STATUS = "service_status"
     SERVICE_STATUS_RESPONSE = "service_status_response"
+    SERVICE_FAILURE = "service_failure"
+    SERVICE_FAILURE_RESPONSE = "service_failure_response"
 
     STATUS = "status"
     ERROR = "error"
