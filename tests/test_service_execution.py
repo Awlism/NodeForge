@@ -254,7 +254,8 @@ async def test_service_crash_and_auto_restart():
             agent,
             agent_task,
         )
-        @pytest.mark.asyncio
+        
+@pytest.mark.asyncio
 async def test_service_max_restart_attempts():
     controller, server_task, agent, agent_task = (
         await create_test_controller_and_agent()
