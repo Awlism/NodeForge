@@ -324,6 +324,7 @@ class NodeAgent:
 
         service_id = payload.get("service_id")
         command = payload.get("command")
+        request_id = payload.get("request_id") or message.message_id
 
         if not service_id or not command:
             response = BaseMessage(
@@ -331,6 +332,7 @@ class NodeAgent:
                 message_id=str(uuid.uuid4()),
                 payload={
                     "service_id": service_id,
+                    "request_id": request_id,
                     "status": "error",
                     "error": "service_id and command are required",
                 },
@@ -348,6 +350,7 @@ class NodeAgent:
                     message_id=str(uuid.uuid4()),
                     payload={
                         "service_id": service_id,
+                        "request_id": request_id,
                         "status": "already_running",
                     },
                 )
@@ -371,6 +374,7 @@ class NodeAgent:
                 message_id=str(uuid.uuid4()),
                 payload={
                     "service_id": service_id,
+                    "request_id": request_id,
                     "status": "started",
                     "pid": process.pid,
                 },
@@ -382,6 +386,7 @@ class NodeAgent:
                 message_id=str(uuid.uuid4()),
                 payload={
                     "service_id": service_id,
+                    "request_id": request_id,
                     "status": "error",
                     "error": str(exc),
                 },
@@ -404,6 +409,7 @@ class NodeAgent:
             return
 
         service_id = payload.get("service_id")
+        request_id = payload.get("request_id") or message.message_id
 
         if not service_id:
             return
@@ -435,6 +441,7 @@ class NodeAgent:
             message_id=str(uuid.uuid4()),
             payload={
                 "service_id": service_id,
+                "request_id": request_id,
                 "status": status,
             },
         )
