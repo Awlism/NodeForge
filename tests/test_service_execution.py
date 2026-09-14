@@ -6,8 +6,8 @@ import pytest
 from freemesh.controller.controller import Controller
 from freemesh.controller.node_registry import NodeState
 from freemesh.node.agent import AgentState, NodeAgent
-from freemesh.protocol.messages import BaseMessage, MessageType
 from freemesh.security.auth import DevelopmentTokenAuthenticator
+from freemesh.protocol.messages import MessageType
 
 
 @pytest.mark.asyncio
@@ -58,23 +58,17 @@ async def test_service_start_command():
                 await asyncio.sleep(0.05)
 
             node = controller.registry.get_node("service-node")
+
             assert node is not None
             assert node.authenticated is True
             assert node.state == NodeState.ONLINE
             assert agent.get_state() == AgentState.READY
 
-            service_message = BaseMessage(
-                type=MessageType.SERVICE_START,
-                message_id="test-service-start",
-                payload={
-                    "service_id": "test-service",
-                    "command": "python -c \"import time; time.sleep(5)\"",
-                },
+            response = await controller.start_service(
+                node_id="service-node",
+                service_id="test-service",
+                command='python -c "import time; time.sleep(5)"',
             )
-
-            await controller._active_nodes["service-node"].send(service_message)
-
-            response = await controller._active_nodes["service-node"].receive()
 
             assert response is not None
             assert response.type == MessageType.SERVICE_START_RESPONSE
