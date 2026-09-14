@@ -2,7 +2,9 @@
 
 from enum import Enum
 from typing import Any, Optional
+
 from pydantic import BaseModel, ConfigDict, Field
+
 
 PROTOCOL_VERSION = "1.0"
 
@@ -24,13 +26,25 @@ class MessageType(str, Enum):
 class BaseMessage(BaseModel):
     """Base message model for all protocol messages."""
 
-    version: str = Field(default=PROTOCOL_VERSION, description="Protocol version")
-    type: MessageType = Field(..., description="Message type")
-    message_id: str = Field(..., description="Unique message identifier")
-    payload: dict[str, Any] = Field(default_factory=dict, description="Message payload")
-    timestamp: Optional[float] = Field(default=None, description="Message timestamp")
+    version: str = Field(
+        default=PROTOCOL_VERSION,
+        description="Protocol version",
+    )
+    type: MessageType = Field(
+        ...,
+        description="Message type",
+    )
+    message_id: str = Field(
+        ...,
+        description="Unique message identifier",
+    )
+    payload: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Message payload",
+    )
+    timestamp: Optional[float] = Field(
+        default=None,
+        description="Message timestamp",
+    )
 
-    class Config:
-        """Pydantic model configuration."""
-
-        use_enum_values = False
+    model_config = ConfigDict(use_enum_values=False)
