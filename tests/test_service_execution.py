@@ -254,3 +254,41 @@ async def test_service_crash_and_auto_restart():
             agent,
             agent_task,
         )
+        @pytest.mark.asyncio
+async def test_service_max_restart_attempts():
+    controller, server_task, agent, agent_task = (
+        await create_test_controller_and_agent()
+    )
+
+    try:
+        response = await controller.start_service(
+            node_id="service-node",
+            service_id="restart-limit-service",
+            command='python -c "import sys; sys.exit(1)"',
+        )
+
+        assert response is not None
+        assert response.type == MessageType.SERVICE_START_RESPONSE
+        assert response.payload["service_id"] == "restart-limit-service"
+        assert response.payload["status"] == "started"
+
+        await asyncio.sleep(1.5)
+
+        status_response = await controller.status_service(
+            node_id="service-node",
+            service_id="restart-limit-service",
+        )
+
+        assert status_response is not None
+        assert status_response.type == MessageType.SERVICE_STATUS_RESPONSE
+        assert status_response.payload["status"] == "crashed"
+        assert status_response.payload["restart_attempts"] == 3
+        assert status_response.payload["max_restart_attempts"] == 3
+
+    finally:
+        await cleanup_test_controller_and_agent(
+            controller,
+            server_task,
+            agent,
+            agent_task,
+        )
