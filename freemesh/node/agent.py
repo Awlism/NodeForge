@@ -604,6 +604,8 @@ class NodeAgent:
                 "request_id": request_id,
                 "status": status,
                 "pid": pid,
+                "restart_attempts": self._service_restart_attempts.get(service_id, 0),
+                "max_restart_attempts": self._max_service_restart_attempts,
             },
         )
 
