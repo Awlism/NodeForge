@@ -55,6 +55,7 @@ class NodeAgent:
         self._service_commands: dict[str, str] = {}
         self._service_statuses: dict[str, str] = {}
         self._service_restart_attempts: dict[str, int] = {}
+        self._max_service_restart_attempts = 3
 
     async def start(self) -> None:
         """Start the node agent and connect to the controller."""
@@ -351,7 +352,7 @@ class NodeAgent:
                         0,
                     )
 
-                    if restart_attempts >= 1:
+                    if restart_attempts >= self._max_service_restart_attempts:
                         continue
 
                     command = self._service_commands.get(service_id)
