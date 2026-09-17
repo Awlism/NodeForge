@@ -382,11 +382,18 @@ class NodeAgent:
 
                     self._services[service_id] = new_process
 
+                    new_restart_attempts = (
+                        restart_attempts + 1
+                    )
+
                     self._service_restart_attempts[
                         service_id
-                    ] = restart_attempts + 1
+                    ] = new_restart_attempts
 
-                    if new_process.returncode is not None:
+                    if (
+                        new_restart_attempts
+                        >= self._max_service_restart_attempts
+                    ):
                         self._service_statuses[
                             service_id
                         ] = "crashed"
@@ -578,13 +585,16 @@ class NodeAgent:
             )
             return
 
-        if process.returncode is None:
+        stored_status = self._service_statuses.get(
+            service_id
+        )
+
+        if stored_status == "crashed":
+            status = "crashed"
+        elif process.returncode is None:
             status = "running"
         else:
-            status = self._service_statuses.get(
-                service_id,
-                "crashed",
-            )
+            status = stored_status or "crashed"
 
         self._service_statuses[service_id] = status
 
@@ -601,6 +611,9 @@ class NodeAgent:
                         service_id,
                         0,
                     )
+                ),
+                "max_restart_attempts": (
+                    self._max_service_restart_attempts
                 ),
             },
         )
