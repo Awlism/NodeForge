@@ -6,7 +6,7 @@ import asyncio
 from typing import Any, Optional
 
 from freemesh.protocol.messages import BaseMessage, MessageType
-from freemesh.transport.tcp import TCPTransport
+from freemesh.protocol.transport import TCPTransport
 
 
 class NodeClient:
@@ -173,13 +173,13 @@ class NodeClient:
 
         return response
 
-    async def register_service(
+    async def start_service(
         self,
         service_id: str,
         command: str,
         requirements: Optional[dict[str, Any]] = None,
     ) -> BaseMessage:
-        """Request service registration/start on the node."""
+        """Start a service on the node."""
 
         if not service_id:
             raise ValueError(
@@ -207,20 +207,6 @@ class NodeClient:
 
         return await self.send(message)
 
-    async def start_service(
-        self,
-        service_id: str,
-        command: str,
-        requirements: Optional[dict[str, Any]] = None,
-    ) -> BaseMessage:
-        """Start a service on the node."""
-
-        return await self.register_service(
-            service_id=service_id,
-            command=command,
-            requirements=requirements,
-        )
-
     async def stop_service(
         self,
         service_id: str,
@@ -246,7 +232,7 @@ class NodeClient:
         self,
         service_id: str,
     ) -> BaseMessage:
-        """Request the current status of a service."""
+        """Request the current service status."""
 
         if not service_id:
             raise ValueError(
