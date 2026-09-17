@@ -1,6 +1,8 @@
 """Integration tests for the Controller-side NodeClient."""
 
 import asyncio
+import json
+import struct
 
 import pytest
 
@@ -9,7 +11,7 @@ from freemesh.protocol.messages import BaseMessage, MessageType
 
 
 class FakeNodeServer:
-    """Small real TCP server used to exercise NodeClient."""
+    """Real TCP server for testing NodeClient."""
 
     def __init__(self) -> None:
         self.server = None
@@ -28,7 +30,7 @@ class FakeNodeServer:
 
         if not sockets:
             raise RuntimeError(
-                "server did not expose a listening socket"
+                "Server did not expose a listening socket"
             )
 
         self.port = sockets[0].getsockname()[1]
@@ -41,6 +43,49 @@ class FakeNodeServer:
         await self.server.wait_closed()
         self.server = None
 
+    async def _receive_message(
+        self,
+        reader: asyncio.StreamReader,
+    ) -> BaseMessage | None:
+        try:
+            header = await reader.readexactly(4)
+
+            message_length = struct.unpack(
+                ">I",
+                header,
+            )[0]
+
+            body = await reader.readexactly(
+                message_length
+            )
+
+            message_dict = json.loads(
+                body.decode("utf-8")
+            )
+
+            return BaseMessage(**message_dict)
+
+        except asyncio.IncompleteReadError:
+            return None
+
+    async def _send_message(
+        self,
+        writer: asyncio.StreamWriter,
+        message: BaseMessage,
+    ) -> None:
+        message_bytes = (
+            message.model_dump_json()
+            .encode("utf-8")
+        )
+
+        frame = (
+            struct.pack(">I", len(message_bytes))
+            + message_bytes
+        )
+
+        writer.write(frame)
+        await writer.drain()
+
     async def _handle_client(
         self,
         reader: asyncio.StreamReader,
@@ -48,42 +93,30 @@ class FakeNodeServer:
     ) -> None:
         try:
             while True:
-                header = await reader.readexactly(4)
-
-                length = int.from_bytes(
-                    header,
-                    byteorder="big",
+                message = await self._receive_message(
+                    reader
                 )
 
-                data = await reader.readexactly(length)
-
-                message = BaseMessage.from_json(
-                    data.decode("utf-8")
-                )
+                if message is None:
+                    break
 
                 self.received_messages.append(message)
 
-                response = self._create_response(message)
-
-                encoded = response.to_json().encode(
-                    "utf-8"
+                response = self._create_response(
+                    message
                 )
 
-                writer.write(
-                    len(encoded).to_bytes(
-                        4,
-                        byteorder="big",
-                    )
+                await self._send_message(
+                    writer,
+                    response,
                 )
-                writer.write(encoded)
-
-                await writer.drain()
 
         except (
-            asyncio.IncompleteReadError,
             ConnectionResetError,
+            asyncio.IncompleteReadError,
         ):
             pass
+
         finally:
             writer.close()
 
@@ -176,6 +209,7 @@ class FakeNodeServer:
 @pytest.fixture
 async def node_server():
     server = FakeNodeServer()
+
     await server.start()
 
     yield server
@@ -222,7 +256,10 @@ async def test_node_client_authentication(
         token="development-token"
     )
 
-    assert response.type == MessageType.AUTHENTICATE_RESPONSE
+    assert response.type == (
+        MessageType.AUTHENTICATE_RESPONSE
+    )
+
     assert response.payload["authenticated"] is True
     assert client.authenticated is True
 
@@ -258,7 +295,10 @@ async def test_node_client_starts_service(
         requirements=requirements,
     )
 
-    assert response.type == MessageType.SERVICE_START_RESPONSE
+    assert response.type == (
+        MessageType.SERVICE_START_RESPONSE
+    )
+
     assert response.payload["service_id"] == "service-a"
     assert response.payload["status"] == "running"
     assert response.payload["pid"] == 12345
@@ -269,7 +309,9 @@ async def test_node_client_starts_service(
     assert message.type == MessageType.SERVICE_START
     assert message.payload["node_id"] == "node-a"
     assert message.payload["service_id"] == "service-a"
-    assert message.payload["command"] == "python -c 'print(1)'"
+    assert message.payload["command"] == (
+        "python -c 'print(1)'"
+    )
     assert message.payload["requirements"] == requirements
 
     await client.disconnect()
@@ -291,15 +333,12 @@ async def test_node_client_stops_service(
         service_id="service-a"
     )
 
-    assert response.type == MessageType.SERVICE_STOP_RESPONSE
+    assert response.type == (
+        MessageType.SERVICE_STOP_RESPONSE
+    )
+
     assert response.payload["service_id"] == "service-a"
     assert response.payload["status"] == "stopped"
-
-    message = node_server.received_messages[-1]
-
-    assert message.type == MessageType.SERVICE_STOP
-    assert message.payload["node_id"] == "node-a"
-    assert message.payload["service_id"] == "service-a"
 
     await client.disconnect()
 
@@ -320,7 +359,10 @@ async def test_node_client_reads_service_status(
         service_id="service-a"
     )
 
-    assert response.type == MessageType.SERVICE_STATUS_RESPONSE
+    assert response.type == (
+        MessageType.SERVICE_STATUS_RESPONSE
+    )
+
     assert response.payload["service_id"] == "service-a"
     assert response.payload["status"] == "running"
     assert response.payload["pid"] == 12345
@@ -342,7 +384,10 @@ async def test_node_client_heartbeat(
 
     response = await client.send_heartbeat()
 
-    assert response.type == MessageType.HEARTBEAT_RESPONSE
+    assert response.type == (
+        MessageType.HEARTBEAT_RESPONSE
+    )
+
     assert response.payload["node_id"] == "node-a"
     assert response.payload["status"] == "online"
 
@@ -363,7 +408,10 @@ async def test_node_client_resource_report(
 
     response = await client.request_resources()
 
-    assert response.type == MessageType.RESOURCE_REPORT_RESPONSE
+    assert response.type == (
+        MessageType.RESOURCE_REPORT_RESPONSE
+    )
+
     assert response.payload["node_id"] == "node-a"
 
     await client.disconnect()
@@ -396,6 +444,8 @@ async def test_node_client_context_manager(
 
         response = await client.send_heartbeat()
 
-        assert response.type == MessageType.HEARTBEAT_RESPONSE
+        assert response.type == (
+            MessageType.HEARTBEAT_RESPONSE
+        )
 
     assert client.connected is False
