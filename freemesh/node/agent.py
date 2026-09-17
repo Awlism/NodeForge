@@ -1,7 +1,6 @@
 """Node agent for NodeForge."""
 
 import asyncio
-import os
 import socket
 import uuid
 from enum import Enum
@@ -73,6 +72,7 @@ class NodeAgent:
                 self.state = AgentState.CONNECTING
 
                 self.transport = TCPTransport()
+
                 await self.transport.connect(
                     self.controller_host,
                     self.controller_port,
@@ -89,7 +89,9 @@ class NodeAgent:
                     self.transport = None
 
                     if self._running:
-                        await asyncio.sleep(self.reconnect_delay_seconds)
+                        await asyncio.sleep(
+                            self.reconnect_delay_seconds
+                        )
 
                     continue
 
@@ -98,9 +100,11 @@ class NodeAgent:
                 self._receiver_task = asyncio.create_task(
                     self._receive_loop()
                 )
+
                 self._heartbeat_task = asyncio.create_task(
                     self._heartbeat_loop()
                 )
+
                 self._service_monitor_task = asyncio.create_task(
                     self._service_monitor_loop()
                 )
@@ -128,6 +132,7 @@ class NodeAgent:
                 for task in done:
                     if not task.cancelled():
                         exception = task.exception()
+
                         if exception is not None:
                             raise exception
 
@@ -152,7 +157,9 @@ class NodeAgent:
                     self.state = AgentState.DISCONNECTED
 
             if self._running:
-                await asyncio.sleep(self.reconnect_delay_seconds)
+                await asyncio.sleep(
+                    self.reconnect_delay_seconds
+                )
 
         self.state = AgentState.DISCONNECTED
 
@@ -287,7 +294,9 @@ class NodeAgent:
     async def _heartbeat_loop(self) -> None:
         """Send periodic heartbeats to the controller."""
         while self._running:
-            await asyncio.sleep(self.heartbeat_interval_seconds)
+            await asyncio.sleep(
+                self.heartbeat_interval_seconds
+            )
 
             if not self._running:
                 break
@@ -313,18 +322,27 @@ class NodeAgent:
         while self._running:
             await asyncio.sleep(0.5)
 
-            for service_id, process in list(self._services.items()):
+            for service_id, process in list(
+                self._services.items()
+            ):
                 if process.returncode is None:
                     continue
 
                 self._service_statuses[service_id] = "crashed"
 
-                restart_attempts = self._service_restart_attempts.get(
-                    service_id,
-                    0,
+                restart_attempts = (
+                    self._service_restart_attempts.get(
+                        service_id,
+                        0,
+                    )
                 )
 
-                if restart_attempts >= self._max_service_restart_attempts:
+                if (
+                    restart_attempts
+                    >= self._max_service_restart_attempts
+                ):
+                    self._service_statuses[service_id] = "crashed"
+
                     if self.transport is not None:
                         failure_message = BaseMessage(
                             type=MessageType.SERVICE_FAILURE,
@@ -336,34 +354,56 @@ class NodeAgent:
                                 "max_restart_attempts": (
                                     self._max_service_restart_attempts
                                 ),
-                                "reason": "maximum restart attempts reached",
+                                "reason": (
+                                    "maximum restart attempts reached"
+                                ),
                             },
                         )
 
-                        await self.transport.send(failure_message)
+                        await self.transport.send(
+                            failure_message
+                        )
 
                     continue
 
-                command = self._service_commands.get(service_id)
+                command = self._service_commands.get(
+                    service_id
+                )
 
                 if not command:
                     continue
 
                 try:
-                    new_process = await asyncio.create_subprocess_shell(
-                        command,
+                    new_process = (
+                        await asyncio.create_subprocess_shell(
+                            command
+                        )
                     )
 
                     self._services[service_id] = new_process
-                    self._service_statuses[service_id] = "running"
-                    self._service_restart_attempts[service_id] = (
-                        restart_attempts + 1
-                    )
+
+                    self._service_restart_attempts[
+                        service_id
+                    ] = restart_attempts + 1
+
+                    if new_process.returncode is not None:
+                        self._service_statuses[
+                            service_id
+                        ] = "crashed"
+                    else:
+                        self._service_statuses[
+                            service_id
+                        ] = "running"
 
                 except Exception:
-                    self._service_statuses[service_id] = "failed"
+                    self._service_statuses[
+                        service_id
+                    ] = "failed"
 
-    async def _handle_service_start(self, message: BaseMessage) -> None:
+    async def _handle_service_start(
+        self,
+        message: BaseMessage,
+    ) -> None:
         """Handle a service start request."""
         service_id = message.payload.get("service_id")
         command = message.payload.get("command")
@@ -374,13 +414,17 @@ class NodeAgent:
                 message.message_id,
                 {
                     "status": "failed",
-                    "reason": "service_id and command are required",
+                    "reason": (
+                        "service_id and command are required"
+                    ),
                 },
             )
             return
 
         try:
-            existing_process = self._services.get(service_id)
+            existing_process = self._services.get(
+                service_id
+            )
 
             if existing_process is not None:
                 if existing_process.returncode is None:
@@ -395,7 +439,11 @@ class NodeAgent:
                     )
                     return
 
-            process = await asyncio.create_subprocess_shell(command)
+            process = (
+                await asyncio.create_subprocess_shell(
+                    command
+                )
+            )
 
             self._services[service_id] = process
             self._service_commands[service_id] = command
@@ -425,7 +473,10 @@ class NodeAgent:
                 },
             )
 
-    async def _handle_service_stop(self, message: BaseMessage) -> None:
+    async def _handle_service_stop(
+        self,
+        message: BaseMessage,
+    ) -> None:
         """Handle a service stop request."""
         service_id = message.payload.get("service_id")
 
@@ -469,7 +520,10 @@ class NodeAgent:
             self._services.pop(service_id, None)
             self._service_commands.pop(service_id, None)
             self._service_statuses.pop(service_id, None)
-            self._service_restart_attempts.pop(service_id, None)
+            self._service_restart_attempts.pop(
+                service_id,
+                None,
+            )
 
             await self._send_service_response(
                 MessageType.SERVICE_STOP_RESPONSE,
@@ -491,7 +545,10 @@ class NodeAgent:
                 },
             )
 
-    async def _handle_service_status(self, message: BaseMessage) -> None:
+    async def _handle_service_status(
+        self,
+        message: BaseMessage,
+    ) -> None:
         """Handle a service status request."""
         service_id = message.payload.get("service_id")
 
@@ -539,9 +596,11 @@ class NodeAgent:
                 "status": status,
                 "pid": process.pid,
                 "returncode": process.returncode,
-                "restart_attempts": self._service_restart_attempts.get(
-                    service_id,
-                    0,
+                "restart_attempts": (
+                    self._service_restart_attempts.get(
+                        service_id,
+                        0,
+                    )
                 ),
             },
         )
@@ -566,7 +625,9 @@ class NodeAgent:
 
     async def _stop_all_services(self) -> None:
         """Stop all running services."""
-        for service_id, process in list(self._services.items()):
+        for service_id, process in list(
+            self._services.items()
+        ):
             try:
                 if process.returncode is None:
                     process.terminate()
