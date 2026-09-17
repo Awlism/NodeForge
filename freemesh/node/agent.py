@@ -53,9 +53,6 @@ class NodeAgent:
         self._service_monitor_task: Optional[asyncio.Task] = None
 
         self._services: Dict[str, asyncio.subprocess.Process] = {}
-        self._service_commands: Dict[str, str] = {}
-        self._service_statuses: Dict[str, str] = {}
-        self._service_restart_attempts: Dict[str, int] = {}
         self._service_models: Dict[str, Service] = {}
 
         self._max_service_restart_attempts = 3
@@ -327,34 +324,32 @@ class NodeAgent:
             for service_id, process in list(
                 self._services.items()
             ):
+                service = self._service_models.get(service_id)
+
+                if service is None:
+                    continue
+
                 if process.returncode is None:
                     continue
 
-                self._service_statuses[service_id] = "crashed"
-
-                restart_attempts = (
-                    self._service_restart_attempts.get(
-                        service_id,
-                        0,
-                    )
-                )
+                service.mark_crashed()
 
                 if (
-                    restart_attempts
-                    >= self._max_service_restart_attempts
+                    service.restart_attempts
+                    >= service.max_restart_attempts
                 ):
-                    self._service_statuses[service_id] = "crashed"
-
                     if self.transport is not None:
                         failure_message = BaseMessage(
                             type=MessageType.SERVICE_FAILURE,
                             message_id=str(uuid.uuid4()),
                             payload={
                                 "service_id": service_id,
-                                "status": "crashed",
-                                "restart_attempts": restart_attempts,
+                                "status": ServiceStatus.CRASHED.value,
+                                "restart_attempts": (
+                                    service.restart_attempts
+                                ),
                                 "max_restart_attempts": (
-                                    self._max_service_restart_attempts
+                                    service.max_restart_attempts
                                 ),
                                 "reason": (
                                     "maximum restart attempts reached"
@@ -368,9 +363,7 @@ class NodeAgent:
 
                     continue
 
-                command = self._service_commands.get(
-                    service_id
-                )
+                command = service.command
 
                 if not command:
                     continue
@@ -384,30 +377,20 @@ class NodeAgent:
 
                     self._services[service_id] = new_process
 
-                    new_restart_attempts = (
-                        restart_attempts + 1
-                    )
-
-                    self._service_restart_attempts[
-                        service_id
-                    ] = new_restart_attempts
+                    service.restart_attempts += 1
 
                     if (
-                        new_restart_attempts
-                        >= self._max_service_restart_attempts
+                        service.restart_attempts
+                        >= service.max_restart_attempts
                     ):
-                        self._service_statuses[
-                            service_id
-                        ] = "crashed"
+                        service.mark_crashed()
                     else:
-                        self._service_statuses[
-                            service_id
-                        ] = "running"
+                        service.mark_running(
+                            pid=new_process.pid
+                        )
 
                 except Exception:
-                    self._service_statuses[
-                        service_id
-                    ] = "failed"
+                    service.mark_failed()
 
     async def _handle_service_start(
         self,
@@ -430,30 +413,35 @@ class NodeAgent:
             )
             return
 
+        existing_process = self._services.get(
+            service_id
+        )
+
+        if existing_process is not None:
+            if existing_process.returncode is None:
+                await self._send_service_response(
+                    MessageType.SERVICE_START_RESPONSE,
+                    message.message_id,
+                    {
+                        "service_id": service_id,
+                        "status": "already_running",
+                        "pid": existing_process.pid,
+                    },
+                )
+                return
+
         service = Service(
             service_id=service_id,
             command=command,
+            max_restart_attempts=(
+                self._max_service_restart_attempts
+            ),
         )
 
         self._service_models[service_id] = service
 
         try:
-            existing_process = self._services.get(
-                service_id
-            )
-
-            if existing_process is not None:
-                if existing_process.returncode is None:
-                    await self._send_service_response(
-                        MessageType.SERVICE_START_RESPONSE,
-                        message.message_id,
-                        {
-                            "service_id": service_id,
-                            "status": "already_running",
-                            "pid": existing_process.pid,
-                        },
-                    )
-                    return
+            service.mark_starting()
 
             process = (
                 await asyncio.create_subprocess_shell(
@@ -462,9 +450,10 @@ class NodeAgent:
             )
 
             self._services[service_id] = process
-            self._service_commands[service_id] = command
-            self._service_statuses[service_id] = "running"
-            self._service_restart_attempts[service_id] = 0
+
+            service.mark_running(
+                pid=process.pid
+            )
 
             await self._send_service_response(
                 MessageType.SERVICE_START_RESPONSE,
@@ -477,7 +466,7 @@ class NodeAgent:
             )
 
         except Exception as exc:
-            self._service_statuses[service_id] = "failed"
+            service.mark_failed()
 
             await self._send_service_response(
                 MessageType.SERVICE_START_RESPONSE,
@@ -508,8 +497,9 @@ class NodeAgent:
             return
 
         process = self._services.get(service_id)
+        service = self._service_models.get(service_id)
 
-        if process is None:
+        if process is None or service is None:
             await self._send_service_response(
                 MessageType.SERVICE_STOP_RESPONSE,
                 message.message_id,
@@ -521,6 +511,8 @@ class NodeAgent:
             return
 
         try:
+            service.mark_stopping()
+
             if process.returncode is None:
                 process.terminate()
 
@@ -533,13 +525,9 @@ class NodeAgent:
                     process.kill()
                     await process.wait()
 
+            service.mark_stopped()
+
             self._services.pop(service_id, None)
-            self._service_commands.pop(service_id, None)
-            self._service_statuses.pop(service_id, None)
-            self._service_restart_attempts.pop(
-                service_id,
-                None,
-            )
             self._service_models.pop(service_id, None)
 
             await self._send_service_response(
@@ -552,6 +540,8 @@ class NodeAgent:
             )
 
         except Exception as exc:
+            service.mark_failed()
+
             await self._send_service_response(
                 MessageType.SERVICE_STOP_RESPONSE,
                 message.message_id,
@@ -581,8 +571,9 @@ class NodeAgent:
             return
 
         process = self._services.get(service_id)
+        service = self._service_models.get(service_id)
 
-        if process is None:
+        if process is None or service is None:
             await self._send_service_response(
                 MessageType.SERVICE_STATUS_RESPONSE,
                 message.message_id,
@@ -595,18 +586,15 @@ class NodeAgent:
             )
             return
 
-        stored_status = self._service_statuses.get(
-            service_id
-        )
-
-        if stored_status == "crashed":
-            status = "crashed"
+        if service.status == ServiceStatus.CRASHED:
+            status = ServiceStatus.CRASHED.value
+        elif service.status == ServiceStatus.FAILED:
+            status = ServiceStatus.FAILED.value
         elif process.returncode is None:
-            status = "running"
+            status = ServiceStatus.RUNNING.value
+            service.status = ServiceStatus.RUNNING
         else:
-            status = stored_status or "crashed"
-
-        self._service_statuses[service_id] = status
+            status = service.status.value
 
         await self._send_service_response(
             MessageType.SERVICE_STATUS_RESPONSE,
@@ -617,13 +605,10 @@ class NodeAgent:
                 "pid": process.pid,
                 "returncode": process.returncode,
                 "restart_attempts": (
-                    self._service_restart_attempts.get(
-                        service_id,
-                        0,
-                    )
+                    service.restart_attempts
                 ),
                 "max_restart_attempts": (
-                    self._max_service_restart_attempts
+                    service.max_restart_attempts
                 ),
             },
         )
@@ -651,7 +636,12 @@ class NodeAgent:
         for service_id, process in list(
             self._services.items()
         ):
+            service = self._service_models.get(service_id)
+
             try:
+                if service is not None:
+                    service.mark_stopping()
+
                 if process.returncode is None:
                     process.terminate()
 
@@ -663,15 +653,16 @@ class NodeAgent:
                     except asyncio.TimeoutError:
                         process.kill()
                         await process.wait()
+
+                if service is not None:
+                    service.mark_stopped()
+
             except Exception:
-                pass
+                if service is not None:
+                    service.mark_failed()
 
             self._services.pop(service_id, None)
             self._service_models.pop(service_id, None)
-
-        self._service_statuses.clear()
-        self._service_commands.clear()
-        self._service_restart_attempts.clear()
 
     def get_state(self) -> AgentState:
         """Return the current agent state."""
