@@ -11,6 +11,7 @@ from freemesh.protocol.messages import BaseMessage, MessageType
 from freemesh.protocol.transport import TCPTransport
 from freemesh.service import ServiceStatus
 from freemesh.service_manager import ServiceManager
+from freemesh.service_requirements import ServiceRequirements
 
 
 class AgentState(str, Enum):
@@ -169,6 +170,7 @@ class NodeAgent:
 
             if self._running:
                 self.state = AgentState.DISCONNECTED
+
                 await asyncio.sleep(
                     self.reconnect_delay_seconds
                 )
@@ -351,9 +353,17 @@ class NodeAgent:
                         message_id=str(uuid.uuid4()),
                         payload={
                             "service_id": service.service_id,
+                            "node_id": self.node_id,
+                            "command": service.command,
                             "status": ServiceStatus.CRASHED.value,
                             "restart_attempts": (
                                 service.restart_attempts
+                            ),
+                            "max_restart_attempts": (
+                                service.max_restart_attempts
+                            ),
+                            "requirements": (
+                                service.requirements.to_dict()
                             ),
                             "error": (
                                 "Maximum restart attempts reached"
@@ -390,11 +400,40 @@ class NodeAgent:
                         service.mark_crashed()
                     else:
                         service.mark_running(
-                            pid=new_process.pid
+                            pid=new_process.pid,
+                            node_id=self.node_id,
                         )
 
-                except Exception:
+                except Exception as exc:
                     service.mark_failed()
+
+                    failure_message = BaseMessage(
+                        type=MessageType.SERVICE_FAILURE,
+                        message_id=str(uuid.uuid4()),
+                        payload={
+                            "service_id": service.service_id,
+                            "node_id": self.node_id,
+                            "command": service.command,
+                            "status": ServiceStatus.FAILED.value,
+                            "restart_attempts": (
+                                service.restart_attempts
+                            ),
+                            "max_restart_attempts": (
+                                service.max_restart_attempts
+                            ),
+                            "requirements": (
+                                service.requirements.to_dict()
+                            ),
+                            "error": str(exc),
+                        },
+                    )
+
+                    try:
+                        await self.transport.send(
+                            failure_message
+                        )
+                    except Exception:
+                        pass
 
     async def _handle_service_start(
         self,
@@ -417,7 +456,9 @@ class NodeAgent:
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "failed",
-                    "error": "service_id and command are required",
+                    "error": (
+                        "service_id and command are required"
+                    ),
                     "request_id": request_id,
                 },
             )
@@ -426,10 +467,35 @@ class NodeAgent:
             return
 
         try:
+            requirements_payload = payload.get(
+                "requirements",
+                {},
+            )
+
+            if requirements_payload is None:
+                requirements_payload = {}
+
+            if not isinstance(
+                requirements_payload,
+                dict,
+            ):
+                raise TypeError(
+                    "requirements must be an object"
+                )
+
+            requirements = (
+                ServiceRequirements.from_dict(
+                    requirements_payload
+                )
+            )
+
             service = await self._service_manager.start_service(
                 service_id=service_id,
                 command=command,
             )
+
+            service.requirements = requirements
+            service.node_id = self.node_id
 
             response = BaseMessage(
                 type=MessageType.SERVICE_START_RESPONSE,
@@ -437,12 +503,17 @@ class NodeAgent:
                 payload={
                     "status": "started",
                     "service_id": service.service_id,
+                    "node_id": self.node_id,
+                    "command": service.command,
                     "pid": service.pid,
                     "restart_attempts": (
                         service.restart_attempts
                     ),
                     "max_restart_attempts": (
                         service.max_restart_attempts
+                    ),
+                    "requirements": (
+                        service.requirements.to_dict()
                     ),
                     "request_id": request_id,
                 },
@@ -455,6 +526,7 @@ class NodeAgent:
                 payload={
                     "status": "failed",
                     "service_id": service_id,
+                    "node_id": self.node_id,
                     "error": str(exc),
                     "request_id": request_id,
                 },
@@ -501,6 +573,7 @@ class NodeAgent:
                 payload={
                     "status": service.status.value,
                     "service_id": service.service_id,
+                    "node_id": self.node_id,
                     "request_id": request_id,
                 },
             )
@@ -512,6 +585,7 @@ class NodeAgent:
                 payload={
                     "status": "failed",
                     "service_id": service_id,
+                    "node_id": self.node_id,
                     "error": str(exc),
                     "request_id": request_id,
                 },
@@ -552,6 +626,7 @@ class NodeAgent:
                 payload={
                     "status": "not_found",
                     "service_id": service_id,
+                    "node_id": self.node_id,
                     "request_id": request_id,
                 },
             )
@@ -564,7 +639,10 @@ class NodeAgent:
             ServiceStatus.FAILED,
         ):
             if process.returncode is None:
-                service.mark_running(pid=process.pid)
+                service.mark_running(
+                    pid=process.pid,
+                    node_id=self.node_id,
+                )
 
         response = BaseMessage(
             type=MessageType.SERVICE_STATUS_RESPONSE,
@@ -572,11 +650,16 @@ class NodeAgent:
             payload={
                 "status": service.status.value,
                 "service_id": service.service_id,
+                "node_id": self.node_id,
+                "command": service.command,
                 "pid": service.pid,
                 "returncode": process.returncode,
                 "restart_attempts": service.restart_attempts,
                 "max_restart_attempts": (
                     service.max_restart_attempts
+                ),
+                "requirements": (
+                    service.requirements.to_dict()
                 ),
                 "request_id": request_id,
             },
