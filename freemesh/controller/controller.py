@@ -5,6 +5,7 @@ import uuid
 from typing import Dict, Optional
 
 from freemesh.controller.node_registry import NodeRegistry, NodeState
+from freemesh.controller.service_registry import ServiceRegistry
 from freemesh.protocol.messages import BaseMessage, MessageType
 from freemesh.protocol.transport import TCPTransport
 from freemesh.security.auth import Authenticator, AuthenticationError
