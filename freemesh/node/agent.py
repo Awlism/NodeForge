@@ -56,6 +56,7 @@ class NodeAgent:
         self._service_commands: Dict[str, str] = {}
         self._service_statuses: Dict[str, str] = {}
         self._service_restart_attempts: Dict[str, int] = {}
+        self._service_models: Dict[str, Service] = {}
 
         self._max_service_restart_attempts = 3
 
