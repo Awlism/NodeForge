@@ -1,7 +1,7 @@
-"""Service migration orchestration for NodeForge."""
+"""Real service migration orchestration for NodeForge."""
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from freemesh.controller.resource_accounting import (
     ResourceAccounting,
@@ -14,9 +14,9 @@ from freemesh.service_requirements import (
 )
 
 
-@dataclass
+@dataclass(frozen=True)
 class MigrationResult:
-    """Result of a service migration."""
+    """Final result of a service migration."""
 
     service_id: str
     source_node_id: str
@@ -27,7 +27,7 @@ class MigrationResult:
 
 
 class MigrationManager:
-    """Coordinate service migration and resource reservations."""
+    """Coordinate the complete migration lifecycle."""
 
     def __init__(
         self,
@@ -37,6 +37,14 @@ class MigrationManager:
             accounting
             or ResourceAccounting()
         )
+
+        self._active_migrations: set[str] = set()
+
+    def is_migrating(
+        self,
+        service_id: str,
+    ) -> bool:
+        return service_id in self._active_migrations
 
     def reserve_service(
         self,
@@ -81,9 +89,12 @@ class MigrationManager:
     async def execute(
         self,
         plan: MigrationPlan,
-        start_service,
+        start_service: Callable[..., Awaitable],
+        verify_service: Optional[
+            Callable[..., Awaitable]
+        ] = None,
     ) -> MigrationResult:
-        """Execute a migration plan through a start callback."""
+        """Execute START → VERIFY → COMMIT migration."""
 
         if not isinstance(
             plan,
@@ -93,6 +104,29 @@ class MigrationManager:
                 "plan must be a MigrationPlan instance"
             )
 
+        if self.is_migrating(
+            plan.service_id
+        ):
+            return MigrationResult(
+                service_id=plan.service_id,
+                source_node_id=plan.source_node_id,
+                target_node_id=plan.target_node_id,
+                status="already_migrating",
+                error=(
+                    "Service migration already in progress"
+                ),
+            )
+
+        previous_reservation = (
+            self.accounting.get(
+                plan.service_id
+            )
+        )
+
+        self._active_migrations.add(
+            plan.service_id
+        )
+
         try:
             response = await start_service(
                 node_id=plan.target_node_id,
@@ -101,11 +135,9 @@ class MigrationManager:
                 requirements=plan.requirements,
             )
 
-            status = response.payload.get(
+            if response.payload.get(
                 "status"
-            )
-
-            if status != "started":
+            ) != "started":
                 return MigrationResult(
                     service_id=plan.service_id,
                     source_node_id=plan.source_node_id,
@@ -117,20 +149,46 @@ class MigrationManager:
                     ),
                 )
 
-            self.reserve_service(
-                service_id=plan.service_id,
-                node_id=plan.target_node_id,
-                requirements=plan.requirements,
+            pid = response.payload.get(
+                "pid"
             )
+
+            if verify_service is not None:
+                verified = await verify_service(
+                    node_id=plan.target_node_id,
+                    service_id=plan.service_id,
+                )
+
+                if not verified:
+                    return MigrationResult(
+                        service_id=plan.service_id,
+                        source_node_id=plan.source_node_id,
+                        target_node_id=plan.target_node_id,
+                        status="verification_failed",
+                        pid=pid,
+                        error=(
+                            "Target service failed health verification"
+                        ),
+                    )
+
+            if previous_reservation is None:
+                self.reserve_service(
+                    service_id=plan.service_id,
+                    node_id=plan.target_node_id,
+                    requirements=plan.requirements,
+                )
+            else:
+                self.migrate_reservation(
+                    service_id=plan.service_id,
+                    target_node_id=plan.target_node_id,
+                )
 
             return MigrationResult(
                 service_id=plan.service_id,
                 source_node_id=plan.source_node_id,
                 target_node_id=plan.target_node_id,
                 status="migrated",
-                pid=response.payload.get(
-                    "pid"
-                ),
+                pid=pid,
             )
 
         except Exception as exc:
@@ -140,4 +198,9 @@ class MigrationManager:
                 target_node_id=plan.target_node_id,
                 status="failed",
                 error=str(exc),
+            )
+
+        finally:
+            self._active_migrations.discard(
+                plan.service_id
             )
