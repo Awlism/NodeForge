@@ -5,6 +5,7 @@ from typing import Iterable, Optional
 
 from freemesh.node.resources import NodeResources
 from freemesh.scheduler.scheduler import NodeCandidate
+from freemesh.service_requirements import ServiceRequirements
 
 
 @dataclass
@@ -33,7 +34,9 @@ class ResourceScheduler:
             )
 
         self.max_cpu_usage_percent = max_cpu_usage_percent
-        self.max_memory_usage_percent = max_memory_usage_percent
+        self.max_memory_usage_percent = (
+            max_memory_usage_percent
+        )
 
     def select_node(
         self,
@@ -43,21 +46,30 @@ class ResourceScheduler:
         required_disk_gb: float = 0.0,
         exclude_node_id: Optional[str] = None,
     ) -> Optional[ResourceNodeCandidate]:
-        """Select the most suitable node with enough resources."""
+        requirements = ServiceRequirements(
+            cpu_cores=required_cpu_cores,
+            memory_mb=required_memory_mb,
+            disk_gb=required_disk_gb,
+        )
 
-        if required_cpu_cores < 0:
-            raise ValueError(
-                "required_cpu_cores cannot be negative"
-            )
+        return self.select_node_for_requirements(
+            nodes=nodes,
+            requirements=requirements,
+            exclude_node_id=exclude_node_id,
+        )
 
-        if required_memory_mb < 0:
-            raise ValueError(
-                "required_memory_mb cannot be negative"
-            )
-
-        if required_disk_gb < 0:
-            raise ValueError(
-                "required_disk_gb cannot be negative"
+    def select_node_for_requirements(
+        self,
+        nodes: Iterable[ResourceNodeCandidate],
+        requirements: ServiceRequirements,
+        exclude_node_id: Optional[str] = None,
+    ) -> Optional[ResourceNodeCandidate]:
+        if not isinstance(
+            requirements,
+            ServiceRequirements,
+        ):
+            raise TypeError(
+                "requirements must be a ServiceRequirements instance"
             )
 
         candidates = []
@@ -73,10 +85,12 @@ class ResourceScheduler:
                 continue
 
             if not node.resources.has_capacity(
-                required_cpu_cores=required_cpu_cores,
-                required_memory_mb=required_memory_mb,
-                required_disk_gb=required_disk_gb,
-                max_cpu_usage_percent=self.max_cpu_usage_percent,
+                required_cpu_cores=requirements.cpu_cores,
+                required_memory_mb=requirements.memory_mb,
+                required_disk_gb=requirements.disk_gb,
+                max_cpu_usage_percent=(
+                    self.max_cpu_usage_percent
+                ),
                 max_memory_usage_percent=(
                     self.max_memory_usage_percent
                 ),
@@ -97,10 +111,12 @@ class ResourceScheduler:
     def _node_load_score(
         node: ResourceNodeCandidate,
     ) -> tuple[float, float, int]:
-        """Return a score used to prefer less-loaded nodes."""
-
         if node.resources is None:
-            return (100.0, 100.0, node.running_services)
+            return (
+                100.0,
+                100.0,
+                node.running_services,
+            )
 
         return (
             node.resources.cpu_usage_percent,
