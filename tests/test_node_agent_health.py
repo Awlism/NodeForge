@@ -21,7 +21,10 @@ async def test_node_agent_detects_crashed_service():
 
     service = await agent._service_manager.start_service(
         service_id="health-service",
-        command="python3 -c \"pass\"",
+        command=(
+            "python3 -c "
+            "\"import time; time.sleep(0.2)\""
+        ),
     )
 
     process = (
@@ -139,3 +142,69 @@ async def test_node_agent_marks_live_service_healthy():
             pass
 
         await agent._service_manager.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_health_checker_detects_process_exit():
+    agent = NodeAgent(
+        node_id="crash-detection-node",
+        controller_host="127.0.0.1",
+        controller_port=9999,
+    )
+
+    process = await asyncio.create_subprocess_shell(
+        "python3 -c \"import time; time.sleep(0.2)\""
+    )
+
+    service = await agent._service_manager.start_service(
+        service_id="crash-detection-service",
+        command=(
+            "python3 -c "
+            "\"import time; time.sleep(0.2)\""
+        ),
+    )
+
+    old_process = (
+        agent._service_manager._services[
+            service.service_id
+        ]
+    )
+
+    if old_process.returncode is None:
+        old_process.terminate()
+        await old_process.wait()
+
+    agent._service_manager._services[
+        service.service_id
+    ] = process
+
+    service.pid = process.pid
+    service.status = ServiceStatus.RUNNING
+
+    await process.wait()
+
+    health = agent._health_checker.check(
+        service
+    )
+
+    assert health == ServiceHealth.CRASHED
+
+    assert (
+        service.status
+        == ServiceStatus.CRASHED
+    )
+
+    assert (
+        service.health
+        == ServiceHealth.CRASHED
+    )
+
+    agent._service_manager._services.pop(
+        service.service_id,
+        None,
+    )
+
+    agent._service_manager._service_models.pop(
+        service.service_id,
+        None,
+    )
