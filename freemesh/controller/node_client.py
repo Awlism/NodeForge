@@ -1,4 +1,4 @@
-"""Controller-side client for communicating with NodeForge nodes."""
+"""Controller-side client for NodeForge nodes."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from freemesh.protocol.transport import TCPTransport
 
 
 class NodeClient:
-    """Maintain a Controller-side connection to a NodeForge node."""
+    """Client used by the Controller to communicate with a Node."""
 
     def __init__(
         self,
@@ -25,7 +25,7 @@ class NodeClient:
         if not host:
             raise ValueError("host is required")
 
-        if port <= 0 or port > 65535:
+        if not 1 <= port <= 65535:
             raise ValueError(
                 "port must be between 1 and 65535"
             )
@@ -48,13 +48,16 @@ class NodeClient:
         self._lock = asyncio.Lock()
 
     async def connect(self) -> None:
-        """Connect to the NodeForge node."""
+        """Connect to the remote Node."""
 
         async with self._lock:
             if self.connected and self.transport is not None:
                 return
 
-            transport = TCPTransport()
+            transport = TCPTransport(
+                host=self.host,
+                port=self.port,
+            )
 
             await asyncio.wait_for(
                 transport.connect(
@@ -69,7 +72,7 @@ class NodeClient:
             self.authenticated = False
 
     async def disconnect(self) -> None:
-        """Disconnect from the node."""
+        """Disconnect from the remote Node."""
 
         async with self._lock:
             transport = self.transport
@@ -81,23 +84,13 @@ class NodeClient:
             if transport is None:
                 return
 
-            disconnect = getattr(
-                transport,
-                "disconnect",
-                None,
-            )
-
-            if disconnect is not None:
-                result = disconnect()
-
-                if asyncio.iscoroutine(result):
-                    await result
+            await transport.disconnect()
 
     async def send(
         self,
         message: BaseMessage,
     ) -> BaseMessage:
-        """Send a message and wait for the response."""
+        """Send a message and wait for its response."""
 
         if not isinstance(message, BaseMessage):
             raise TypeError(
@@ -111,44 +104,28 @@ class NodeClient:
                 f"Node {self.node_id} is not connected"
             )
 
-        send_message = getattr(
-            transport,
-            "send",
-            None,
+        await transport.send(message)
+
+        response = await asyncio.wait_for(
+            transport.receive(),
+            timeout=self.timeout,
         )
 
-        if send_message is None:
-            send_message = getattr(
-                transport,
-                "send_message",
-                None,
+        if response is None:
+            self.connected = False
+            self.authenticated = False
+
+            raise ConnectionError(
+                f"Node {self.node_id} disconnected"
             )
 
-        if send_message is None:
-            raise RuntimeError(
-                "TCPTransport does not provide a send method"
-            )
-
-        result = send_message(message)
-
-        if asyncio.iscoroutine(result):
-            result = await asyncio.wait_for(
-                result,
-                timeout=self.timeout,
-            )
-
-        if not isinstance(result, BaseMessage):
-            raise TypeError(
-                "transport response must be a BaseMessage instance"
-            )
-
-        return result
+        return response
 
     async def authenticate(
         self,
         token: str,
     ) -> BaseMessage:
-        """Authenticate the Controller connection with the node."""
+        """Authenticate with the remote Node."""
 
         if not token:
             raise ValueError("token is required")
@@ -164,12 +141,12 @@ class NodeClient:
         response = await self.send(message)
 
         if response.type == MessageType.AUTHENTICATE_RESPONSE:
-            authenticated = response.payload.get(
-                "authenticated",
-                True,
+            self.authenticated = bool(
+                response.payload.get(
+                    "authenticated",
+                    False,
+                )
             )
-
-            self.authenticated = bool(authenticated)
 
         return response
 
@@ -179,7 +156,7 @@ class NodeClient:
         command: str,
         requirements: Optional[dict[str, Any]] = None,
     ) -> BaseMessage:
-        """Start a service on the node."""
+        """Start a service on the remote Node."""
 
         if not service_id:
             raise ValueError(
@@ -211,7 +188,7 @@ class NodeClient:
         self,
         service_id: str,
     ) -> BaseMessage:
-        """Stop a service on the node."""
+        """Stop a service on the remote Node."""
 
         if not service_id:
             raise ValueError(
@@ -232,7 +209,7 @@ class NodeClient:
         self,
         service_id: str,
     ) -> BaseMessage:
-        """Request the current service status."""
+        """Get the status of a service."""
 
         if not service_id:
             raise ValueError(
@@ -250,7 +227,7 @@ class NodeClient:
         return await self.send(message)
 
     async def send_heartbeat(self) -> BaseMessage:
-        """Send a heartbeat request to the node."""
+        """Send a heartbeat to the remote Node."""
 
         message = BaseMessage(
             type=MessageType.HEARTBEAT,
@@ -262,7 +239,7 @@ class NodeClient:
         return await self.send(message)
 
     async def request_resources(self) -> BaseMessage:
-        """Request the node's current resource information."""
+        """Request the current resource report."""
 
         message = BaseMessage(
             type=MessageType.RESOURCE_REPORT,
@@ -278,7 +255,7 @@ class NodeClient:
         message_type: MessageType,
         payload: Optional[dict[str, Any]] = None,
     ) -> BaseMessage:
-        """Send a generic protocol command to the node."""
+        """Send a generic protocol command."""
 
         if not isinstance(
             message_type,
