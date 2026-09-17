@@ -26,17 +26,17 @@ async def test_controller_reconciles_missing_running_service(
         service_id,
         command,
         *,
-        cpu_cores=0.0,
-        memory_mb=0,
-        disk_gb=0.0,
+        required_cpu_cores=0.0,
+        required_memory_mb=0,
+        required_disk_gb=0.0,
     ):
         calls.append(
             {
                 "service_id": service_id,
                 "command": command,
-                "cpu_cores": cpu_cores,
-                "memory_mb": memory_mb,
-                "disk_gb": disk_gb,
+                "required_cpu_cores": required_cpu_cores,
+                "required_memory_mb": required_memory_mb,
+                "required_disk_gb": required_disk_gb,
             }
         )
 
@@ -173,17 +173,17 @@ async def test_controller_reconcile_all_services(
         service_id,
         command,
         *,
-        cpu_cores=0.0,
-        memory_mb=0,
-        disk_gb=0.0,
+        required_cpu_cores=0.0,
+        required_memory_mb=0,
+        required_disk_gb=0.0,
     ):
         calls.append(
             {
                 "service_id": service_id,
                 "command": command,
-                "cpu_cores": cpu_cores,
-                "memory_mb": memory_mb,
-                "disk_gb": disk_gb,
+                "required_cpu_cores": required_cpu_cores,
+                "required_memory_mb": required_memory_mb,
+                "required_disk_gb": required_disk_gb,
             }
         )
 
