@@ -6,6 +6,7 @@ import uuid
 from enum import Enum
 from typing import Optional
 
+from freemesh.node.resources import collect_node_resources
 from freemesh.protocol.messages import BaseMessage, MessageType
 from freemesh.protocol.transport import TCPTransport
 from freemesh.service import ServiceStatus
@@ -54,6 +55,38 @@ class NodeAgent:
         self._service_manager = ServiceManager(
             max_restart_attempts=3
         )
+
+    def _collect_resource_payload(self) -> dict:
+        """Collect current resource information for this node."""
+
+        resources = collect_node_resources(
+            running_services=len(
+                self._service_manager.list_services()
+            ),
+        )
+
+        return {
+            "node_id": self.node_id,
+            "cpu_cores": resources.cpu_cores,
+            "cpu_usage_percent": (
+                resources.cpu_usage_percent
+            ),
+            "memory_total_mb": (
+                resources.memory_total_mb
+            ),
+            "memory_used_mb": (
+                resources.memory_used_mb
+            ),
+            "disk_total_gb": (
+                resources.disk_total_gb
+            ),
+            "disk_used_gb": (
+                resources.disk_used_gb
+            ),
+            "running_services": (
+                resources.running_services
+            ),
+        }
 
     async def start(self) -> None:
         """Start the node agent."""
@@ -123,7 +156,9 @@ class NodeAgent:
 
             if self._running:
                 self.state = AgentState.DISCONNECTED
-                await asyncio.sleep(self.reconnect_delay_seconds)
+                await asyncio.sleep(
+                    self.reconnect_delay_seconds
+                )
 
         self.state = AgentState.DISCONNECTED
 
