@@ -17,6 +17,7 @@ class RestartEngine:
         max_restart_attempts: int = 3,
         backoff_seconds: float = 0.0,
         health_checker: ServiceHealthChecker | None = None,
+        startup_grace_seconds: float = 0.05,
     ) -> None:
         if max_restart_attempts < 0:
             raise ValueError(
@@ -28,8 +29,22 @@ class RestartEngine:
                 "backoff_seconds cannot be negative"
             )
 
-        self.max_restart_attempts = max_restart_attempts
-        self.backoff_seconds = backoff_seconds
+        if startup_grace_seconds < 0:
+            raise ValueError(
+                "startup_grace_seconds cannot be negative"
+            )
+
+        self.max_restart_attempts = (
+            max_restart_attempts
+        )
+
+        self.backoff_seconds = (
+            backoff_seconds
+        )
+
+        self.startup_grace_seconds = (
+            startup_grace_seconds
+        )
 
         self.health_checker = (
             health_checker
@@ -45,8 +60,11 @@ class RestartEngine:
     ) -> bool:
         """Restart a crashed service.
 
-        Returns True when the restarted service becomes healthy.
-        Returns False when all restart attempts are exhausted.
+        Returns True when the restarted service becomes
+        healthy.
+
+        Returns False when all restart attempts are
+        exhausted.
         """
 
         if service.status.value not in {
@@ -96,7 +114,30 @@ class RestartEngine:
                     node_id=node_id,
                 )
 
-                await asyncio.sleep(0)
+                # Give the process a short startup grace
+                # period so very short-lived failures are
+                # detected before declaring the restart
+                # successful.
+                if (
+                    self.startup_grace_seconds > 0
+                ):
+                    try:
+                        await asyncio.wait_for(
+                            process.wait(),
+                            timeout=(
+                                self.startup_grace_seconds
+                            ),
+                        )
+
+                        # The process exited during the
+                        # startup grace period.
+                        service.mark_crashed()
+
+                        continue
+
+                    except asyncio.TimeoutError:
+                        # The process is still running.
+                        pass
 
                 health = (
                     self.health_checker.check(
