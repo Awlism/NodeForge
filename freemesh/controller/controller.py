@@ -25,6 +25,13 @@ from freemesh.controller.resource_failover import (
 from freemesh.controller.resource_registry import (
     ResourceRegistry,
 )
+from freemesh.controller.service_intent import (
+    DesiredState,
+    ServiceIntent,
+)
+from freemesh.controller.service_intent_registry import (
+    ServiceIntentRegistry,
+)
 from freemesh.controller.service_placement import (
     ServicePlacement,
 )
@@ -71,6 +78,9 @@ class Controller:
         self.registry = NodeRegistry()
         self.resource_registry = ResourceRegistry()
         self.service_registry = ServiceRegistry()
+        self.service_intent_registry = (
+            ServiceIntentRegistry()
+        )
         self.failure_manager = FailureManager()
 
         self.failover_manager = FailoverManager()
@@ -119,6 +129,61 @@ class Controller:
             str,
             asyncio.Event,
         ] = {}
+
+    def create_service_intent(
+        self,
+        service_id: str,
+        command: str,
+        requirements: ServiceRequirements | None = None,
+        desired_state: DesiredState = DesiredState.RUNNING,
+    ) -> ServiceIntent:
+        """Create and register a desired service intent."""
+
+        if requirements is None:
+            requirements = ServiceRequirements()
+
+        intent = ServiceIntent(
+            service_id=service_id,
+            desired_state=desired_state,
+            command=command,
+            requirements=requirements,
+        )
+
+        return self.service_intent_registry.register(
+            intent
+        )
+
+    def get_service_intent(
+        self,
+        service_id: str,
+    ) -> ServiceIntent | None:
+        """Return the desired intent for a service."""
+
+        return self.service_intent_registry.get(
+            service_id
+        )
+
+    def set_service_desired_state(
+        self,
+        service_id: str,
+        desired_state: DesiredState,
+    ) -> ServiceIntent:
+        """Change the desired state of a service."""
+
+        return self.service_intent_registry.set_desired_state(
+            service_id,
+            desired_state,
+        )
+
+    def remove_service_intent(
+        self,
+        service_id: str,
+    ) -> ServiceIntent:
+        """Remove a service desired intent."""
+
+        return self.service_intent_registry.remove(
+            service_id
+        )
 
     async def start(self) -> None:
         """Start the controller."""
