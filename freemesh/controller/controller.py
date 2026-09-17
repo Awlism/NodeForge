@@ -4,10 +4,13 @@ import asyncio
 import uuid
 from typing import Dict, Optional
 
+from freemesh.controller.failure_manager import FailureManager
+from freemesh.controller.failover_manager import FailoverManager
 from freemesh.controller.node_registry import NodeRegistry, NodeState
 from freemesh.controller.service_registry import ServiceRegistry
 from freemesh.protocol.messages import BaseMessage, MessageType
 from freemesh.protocol.transport import TCPTransport
+from freemesh.scheduler.scheduler import NodeCandidate
 from freemesh.security.auth import Authenticator, AuthenticationError
 
 
@@ -28,6 +31,8 @@ class Controller:
 
         self.registry = NodeRegistry()
         self.service_registry = ServiceRegistry()
+        self.failure_manager = FailureManager()
+        self.failover_manager = FailoverManager()
 
         self.server: Optional[asyncio.Server] = None
         self._running = False
@@ -419,6 +424,12 @@ class Controller:
                         node_id=node_id,
                     )
 
+                elif message.type == MessageType.SERVICE_FAILURE:
+                    await self._handle_service_failure(
+                        node_id=node_id,
+                        message=message,
+                    )
+
                 elif message.type == MessageType.ERROR:
                     self._store_service_response(
                         message,
@@ -539,6 +550,104 @@ class Controller:
 
         if event:
             event.set()
+
+    async def _handle_service_failure(
+        self,
+        node_id: str,
+        message: BaseMessage,
+    ) -> None:
+        """Handle a terminal service failure."""
+
+        payload = message.payload
+
+        if not isinstance(payload, dict):
+            return
+
+        service_id = payload.get("service_id")
+
+        if not service_id:
+            return
+
+        status = payload.get("status", "crashed")
+        reason = payload.get("error")
+        restart_attempts = payload.get(
+            "restart_attempts",
+            0,
+        )
+
+        self.failure_manager.record_failure(
+            service_id=service_id,
+            node_id=node_id,
+            status=status,
+            reason=reason,
+            restart_attempts=restart_attempts,
+        )
+
+        service = self.service_registry.get_service(
+            service_id
+        )
+
+        if service is None:
+            return
+
+        self.service_registry.update_service(
+            service_id=service_id,
+            status=status,
+        )
+
+        nodes = []
+
+        for node in self.registry.list_nodes():
+            if node.state != NodeState.ONLINE:
+                continue
+
+            if not node.authenticated:
+                continue
+
+            nodes.append(
+                NodeCandidate(
+                    node_id=node.node_id,
+                    available=True,
+                    running_services=len(
+                        self.service_registry.list_node_services(
+                            node.node_id
+                        )
+                    ),
+                )
+            )
+
+        replacement = (
+            self.failover_manager.select_replacement_node(
+                nodes=nodes,
+                failed_node_id=node_id,
+            )
+        )
+
+        if replacement is None:
+            return
+
+        try:
+            response = await self.start_service(
+                node_id=replacement.node_id,
+                service_id=service.service_id,
+                command=service.command or "",
+            )
+
+            if response.payload.get("status") == "started":
+                self.service_registry.register_service(
+                    service_id=service.service_id,
+                    node_id=replacement.node_id,
+                    status="running",
+                    pid=response.payload.get("pid"),
+                    command=service.command,
+                )
+
+                self.failure_manager.clear_failure(
+                    service.service_id
+                )
+
+        except Exception:
+            return
 
     async def start_service(
         self,
