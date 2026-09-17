@@ -27,6 +27,8 @@ class Controller:
         self.authenticator = authenticator
 
         self.registry = NodeRegistry()
+        self.service_registry = ServiceRegistry()
+
         self.server: Optional[asyncio.Server] = None
         self._running = False
         self._offline_detection_task: Optional[asyncio.Task] = None
@@ -442,7 +444,7 @@ class Controller:
         self,
         message: BaseMessage,
     ) -> None:
-        """Store a service response and wake its waiter."""
+        """Store a service response and update the service registry."""
 
         request_id = message.payload.get("request_id")
 
@@ -450,6 +452,61 @@ class Controller:
             request_id = message.message_id
 
         self._service_responses[request_id] = message
+
+        service_id = message.payload.get("service_id")
+
+        if service_id:
+            if message.type == MessageType.SERVICE_START_RESPONSE:
+                self.service_registry.register_service(
+                    service_id=service_id,
+                    node_id=message.payload.get(
+                        "node_id",
+                        "",
+                    ),
+                    status=message.payload.get(
+                        "status",
+                        "started",
+                    ),
+                    pid=message.payload.get("pid"),
+                    command=message.payload.get("command"),
+                )
+
+            elif message.type == MessageType.SERVICE_STATUS_RESPONSE:
+                existing_service = (
+                    self.service_registry.get_service(
+                        service_id
+                    )
+                )
+
+                if existing_service is not None:
+                    self.service_registry.update_service(
+                        service_id=service_id,
+                        status=message.payload.get(
+                            "status",
+                            existing_service.status,
+                        ),
+                        pid=message.payload.get(
+                            "pid",
+                            existing_service.pid,
+                        ),
+                    )
+
+            elif message.type == MessageType.SERVICE_STOP_RESPONSE:
+                existing_service = (
+                    self.service_registry.get_service(
+                        service_id
+                    )
+                )
+
+                if existing_service is not None:
+                    self.service_registry.update_service(
+                        service_id=service_id,
+                        status=message.payload.get(
+                            "status",
+                            "stopped",
+                        ),
+                        pid=None,
+                    )
 
         event = self._service_response_events.get(request_id)
 
