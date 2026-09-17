@@ -4,7 +4,7 @@ import asyncio
 import socket
 import uuid
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from freemesh.protocol.messages import BaseMessage, MessageType
 from freemesh.protocol.transport import TCPTransport
@@ -33,6 +33,7 @@ class NodeAgent:
         controller_port: int = 9999,
         authentication_token: Optional[str] = None,
         reconnect_delay_seconds: float = 5.0,
+        heartbeat_interval_seconds: float = 5.0,
     ):
         self.node_id = node_id or str(uuid.uuid4())
         self.hostname = hostname or socket.gethostname()
@@ -40,6 +41,7 @@ class NodeAgent:
         self.controller_port = controller_port
         self.authentication_token = authentication_token
         self.reconnect_delay_seconds = reconnect_delay_seconds
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
 
         self.state = AgentState.DISCONNECTED
         self.transport = TCPTransport()
@@ -245,7 +247,9 @@ class NodeAgent:
         """Send periodic heartbeats."""
 
         while self._running:
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(
+                self.heartbeat_interval_seconds
+            )
 
             if not await self.transport.is_connected():
                 break
