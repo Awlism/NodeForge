@@ -8,6 +8,7 @@ from freemesh.controller.failure_manager import FailureManager
 from freemesh.controller.failover_manager import FailoverManager
 from freemesh.controller.node_registry import NodeRegistry, NodeState
 from freemesh.controller.resource_registry import ResourceRegistry
+from freemesh.controller.service_placement import ServicePlacement
 from freemesh.controller.service_registry import ServiceRegistry
 from freemesh.node.resources import NodeResources
 from freemesh.protocol.messages import BaseMessage, MessageType
@@ -18,6 +19,7 @@ from freemesh.scheduler.resource_scheduler import (
 )
 from freemesh.scheduler.scheduler import NodeCandidate
 from freemesh.security.auth import Authenticator, AuthenticationError
+from freemesh.service_requirements import ServiceRequirements
 
 
 class Controller:
@@ -41,6 +43,10 @@ class Controller:
         self.failure_manager = FailureManager()
         self.failover_manager = FailoverManager()
         self.resource_scheduler = ResourceScheduler()
+
+        self.service_placement = ServicePlacement(
+            scheduler=self.resource_scheduler,
+        )
 
         self.server: Optional[asyncio.Server] = None
         self._running = False
@@ -187,9 +193,10 @@ class Controller:
             if node_id:
                 self._active_nodes.pop(node_id, None)
 
-            self.resource_registry.remove_resources(
-                node_id
-            ) if node_id else None
+            if node_id:
+                self.resource_registry.remove_resources(
+                    node_id
+                )
 
             await transport.disconnect()
 
@@ -564,7 +571,9 @@ class Controller:
             )
 
             if resources.cpu_cores < 0:
-                raise ValueError("cpu_cores cannot be negative")
+                raise ValueError(
+                    "cpu_cores cannot be negative"
+                )
 
             if not 0 <= resources.cpu_usage_percent <= 100:
                 raise ValueError(
@@ -858,15 +867,19 @@ class Controller:
     ) -> Optional[ResourceNodeCandidate]:
         """Select a node with enough resources for a service."""
 
+        requirements = ServiceRequirements(
+            cpu_cores=required_cpu_cores,
+            memory_mb=required_memory_mb,
+            disk_gb=required_disk_gb,
+        )
+
         candidates = self._build_resource_candidates(
             exclude_node_id=exclude_node_id,
         )
 
-        return self.resource_scheduler.select_node(
+        return self.resource_scheduler.select_node_for_requirements(
             nodes=candidates,
-            required_cpu_cores=required_cpu_cores,
-            required_memory_mb=required_memory_mb,
-            required_disk_gb=required_disk_gb,
+            requirements=requirements,
         )
 
     async def start_service_auto(
@@ -886,21 +899,30 @@ class Controller:
         if not command:
             raise ValueError("command is required")
 
-        selected_node = self.select_node_for_service(
-            required_cpu_cores=required_cpu_cores,
-            required_memory_mb=required_memory_mb,
-            required_disk_gb=required_disk_gb,
+        requirements = ServiceRequirements(
+            cpu_cores=required_cpu_cores,
+            memory_mb=required_memory_mb,
+            disk_gb=required_disk_gb,
         )
 
-        if selected_node is None:
+        candidates = self._build_resource_candidates()
+
+        placement = self.service_placement.select_node(
+            service_id=service_id,
+            requirements=requirements,
+            nodes=candidates,
+        )
+
+        if placement is None:
             raise RuntimeError(
                 "No available node has enough resources"
             )
 
         return await self.start_service(
-            node_id=selected_node.node_id,
+            node_id=placement.node_id,
             service_id=service_id,
             command=command,
+            requirements=requirements,
             timeout_seconds=timeout_seconds,
         )
 
@@ -909,6 +931,7 @@ class Controller:
         node_id: str,
         service_id: str,
         command: str,
+        requirements: Optional[ServiceRequirements] = None,
         timeout_seconds: float = 10.0,
     ) -> BaseMessage:
         """Request a node to start a service."""
@@ -926,6 +949,17 @@ class Controller:
         if not command:
             raise ValueError("command is required")
 
+        if requirements is None:
+            requirements = ServiceRequirements()
+
+        if not isinstance(
+            requirements,
+            ServiceRequirements,
+        ):
+            raise TypeError(
+                "requirements must be a ServiceRequirements instance"
+            )
+
         request_id = str(uuid.uuid4())
 
         event = asyncio.Event()
@@ -938,6 +972,7 @@ class Controller:
             payload={
                 "service_id": service_id,
                 "command": command,
+                "requirements": requirements.to_dict(),
                 "request_id": request_id,
             },
         )
@@ -1031,6 +1066,7 @@ class Controller:
                 request_id,
                 None,
             )
+
             self._service_responses.pop(
                 request_id,
                 None,
@@ -1088,6 +1124,7 @@ class Controller:
                 request_id,
                 None,
             )
+
             self._service_responses.pop(
                 request_id,
                 None,
