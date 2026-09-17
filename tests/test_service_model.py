@@ -23,20 +23,43 @@ def test_service_lifecycle_transitions():
 
     assert service.status == ServiceStatus.STOPPED
 
-    service.status = ServiceStatus.STARTING
+    service.mark_starting()
     assert service.status == ServiceStatus.STARTING
 
-    service.status = ServiceStatus.RUNNING
-    service.pid = 12345
-
+    service.mark_running(pid=12345)
     assert service.status == ServiceStatus.RUNNING
     assert service.pid == 12345
 
-    service.status = ServiceStatus.STOPPING
+    service.mark_stopping()
     assert service.status == ServiceStatus.STOPPING
 
-    service.status = ServiceStatus.STOPPED
-    service.pid = None
-
+    service.mark_stopped()
     assert service.status == ServiceStatus.STOPPED
+    assert service.pid is None
+
+
+def test_service_crash_transition():
+    service = Service(
+        service_id="crash-service",
+        command="python -c \"print('hello')\"",
+    )
+
+    service.mark_starting()
+    service.mark_running(pid=12345)
+    service.mark_crashed()
+
+    assert service.status == ServiceStatus.CRASHED
+    assert service.pid == 12345
+
+
+def test_service_failed_transition():
+    service = Service(
+        service_id="failed-service",
+        command="invalid-command",
+    )
+
+    service.mark_starting()
+    service.mark_failed()
+
+    assert service.status == ServiceStatus.FAILED
     assert service.pid is None
