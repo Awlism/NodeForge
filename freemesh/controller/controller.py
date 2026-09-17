@@ -1571,6 +1571,42 @@ class Controller:
         except Exception:
             return
 
+    async def _recover_services_from_node(
+        self,
+        node_id: str,
+    ) -> None:
+        """Automatically recover services from an offline node."""
+
+        services = (
+            self.service_registry.list_node_services(
+                node_id
+            )
+        )
+
+        for service in services:
+            try:
+                if service.status in {
+                    "stopped",
+                    "failed",
+                }:
+                    continue
+
+                await self.migrate_service(
+                    service_id=service.service_id,
+                    failed_node_id=node_id,
+                )
+
+            except (
+                RuntimeError,
+                TimeoutError,
+                KeyError,
+                ValueError,
+            ):
+                continue
+
+            except Exception:
+                continue
+
     async def _run_service_health_monitor(
         self,
     ) -> None:
@@ -1618,7 +1654,7 @@ class Controller:
     async def _run_offline_detection(
         self,
     ) -> None:
-        """Run offline node detection."""
+        """Run offline detection and automatic service recovery."""
 
         while self._running:
             try:
@@ -1637,12 +1673,18 @@ class Controller:
                 )
 
                 for node_info in offline_nodes:
+                    node_id = node_info.node_id
+
                     self.registry.mark_offline(
-                        node_info.node_id
+                        node_id
                     )
 
                     self.resource_registry.remove_resources(
-                        node_info.node_id
+                        node_id
+                    )
+
+                    await self._recover_services_from_node(
+                        node_id
                     )
 
             except asyncio.CancelledError:
