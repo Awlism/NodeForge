@@ -329,7 +329,7 @@ class NodeAgent:
             await self.transport.send(resource_report)
 
     async def _service_monitor_loop(self) -> None:
-        """Monitor service health and report crashes."""
+        """Monitor service health and restart crashed services."""
 
         while self._running:
             await asyncio.sleep(0.5)
@@ -342,40 +342,109 @@ class NodeAgent:
                 if process is None:
                     continue
 
+                # The process is alive.
+                #
+                # The HealthChecker verifies the actual OS process
+                # instead of assuming that a PID means healthy.
                 if process.returncode is None:
                     self._health_checker.check(service)
                     continue
 
+                # The process has exited.
                 service.mark_crashed()
 
-                failure_message = BaseMessage(
-                    type=MessageType.SERVICE_FAILURE,
-                    message_id=str(uuid.uuid4()),
-                    payload={
-                        "service_id": service.service_id,
-                        "node_id": self.node_id,
-                        "command": service.command,
-                        "status": ServiceStatus.CRASHED.value,
-                        "restart_attempts": (
-                            service.restart_attempts
-                        ),
-                        "max_restart_attempts": (
-                            service.max_restart_attempts
-                        ),
-                        "requirements": (
-                            service.requirements.to_dict()
-                        ),
-                        "health": service.health.value,
-                        "error": "Service process exited",
-                    },
-                )
-
-                try:
-                    await self.transport.send(
-                        failure_message
+                # Maximum restart attempts have already been reached.
+                if (
+                    service.restart_attempts
+                    >= service.max_restart_attempts
+                ):
+                    failure_message = BaseMessage(
+                        type=MessageType.SERVICE_FAILURE,
+                        message_id=str(uuid.uuid4()),
+                        payload={
+                            "service_id": service.service_id,
+                            "node_id": self.node_id,
+                            "command": service.command,
+                            "status": ServiceStatus.CRASHED.value,
+                            "restart_attempts": (
+                                service.restart_attempts
+                            ),
+                            "max_restart_attempts": (
+                                service.max_restart_attempts
+                            ),
+                            "requirements": (
+                                service.requirements.to_dict()
+                            ),
+                            "health": service.health.value,
+                            "error": (
+                                "Maximum restart attempts reached"
+                            ),
+                        },
                     )
-                except Exception:
-                    pass
+
+                    try:
+                        await self.transport.send(
+                            failure_message
+                        )
+                    except Exception:
+                        pass
+
+                    continue
+
+                # Try to restart the service.
+                try:
+                    new_process = (
+                        await asyncio.create_subprocess_shell(
+                            service.command
+                        )
+                    )
+
+                    self._service_manager._services[
+                        service.service_id
+                    ] = new_process
+
+                    service.restart_attempts += 1
+
+                    service.mark_running(
+                        pid=new_process.pid,
+                        node_id=self.node_id,
+                    )
+
+                    # Verify the new process immediately.
+                    self._health_checker.check(service)
+
+                except Exception as exc:
+                    service.restart_attempts += 1
+                    service.mark_failed()
+
+                    failure_message = BaseMessage(
+                        type=MessageType.SERVICE_FAILURE,
+                        message_id=str(uuid.uuid4()),
+                        payload={
+                            "service_id": service.service_id,
+                            "node_id": self.node_id,
+                            "command": service.command,
+                            "status": ServiceStatus.FAILED.value,
+                            "restart_attempts": (
+                                service.restart_attempts
+                            ),
+                            "max_restart_attempts": (
+                                service.max_restart_attempts
+                            ),
+                            "requirements": (
+                                service.requirements.to_dict()
+                            ),
+                            "health": service.health.value,
+                            "error": str(exc),
+                        },
+                    )
+
+                    try:
+                        await self.transport.send(
+                            failure_message
+                        )
+                    except Exception:
+                        pass
 
     async def _handle_service_start(
         self,
@@ -457,6 +526,7 @@ class NodeAgent:
                     "requirements": (
                         service.requirements.to_dict()
                     ),
+                    "health": service.health.value,
                     "request_id": request_id,
                 },
             )
