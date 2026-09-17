@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from freemesh.service_requirements import ServiceRequirements
+
 
 @dataclass
 class ServiceInfo:
@@ -14,6 +16,9 @@ class ServiceInfo:
     status: str
     pid: Optional[int] = None
     command: Optional[str] = None
+    requirements: ServiceRequirements = field(
+        default_factory=ServiceRequirements
+    )
     updated_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -32,6 +37,7 @@ class ServiceRegistry:
         status: str,
         pid: Optional[int] = None,
         command: Optional[str] = None,
+        requirements: Optional[ServiceRequirements] = None,
     ) -> ServiceInfo:
         """Register a service or update an existing service."""
 
@@ -44,12 +50,24 @@ class ServiceRegistry:
         if not status:
             raise ValueError("status is required")
 
+        if requirements is None:
+            requirements = ServiceRequirements()
+
+        if not isinstance(
+            requirements,
+            ServiceRequirements,
+        ):
+            raise TypeError(
+                "requirements must be a ServiceRequirements instance"
+            )
+
         service = ServiceInfo(
             service_id=service_id,
             node_id=node_id,
             status=status,
             pid=pid,
             command=command,
+            requirements=requirements,
         )
 
         self._services[service_id] = service
@@ -86,8 +104,11 @@ class ServiceRegistry:
         service_id: str,
         status: Optional[str] = None,
         pid: Optional[int] = None,
+        node_id: Optional[str] = None,
+        command: Optional[str] = None,
+        requirements: Optional[ServiceRequirements] = None,
     ) -> ServiceInfo:
-        """Update the runtime state of a service."""
+        """Update the runtime state or placement of a service."""
 
         service = self._services.get(service_id)
 
@@ -102,9 +123,45 @@ class ServiceRegistry:
         if pid is not None:
             service.pid = pid
 
+        if node_id is not None:
+            service.node_id = node_id
+
+        if command is not None:
+            service.command = command
+
+        if requirements is not None:
+            if not isinstance(
+                requirements,
+                ServiceRequirements,
+            ):
+                raise TypeError(
+                    "requirements must be a ServiceRequirements instance"
+                )
+
+            service.requirements = requirements
+
         service.updated_at = datetime.now(timezone.utc)
 
         return service
+
+    def move_service(
+        self,
+        service_id: str,
+        node_id: str,
+        pid: Optional[int] = None,
+        status: str = "running",
+    ) -> ServiceInfo:
+        """Move an existing service to another node."""
+
+        if not node_id:
+            raise ValueError("node_id is required")
+
+        return self.update_service(
+            service_id=service_id,
+            status=status,
+            pid=pid,
+            node_id=node_id,
+        )
 
     def remove_service(
         self,
@@ -112,7 +169,10 @@ class ServiceRegistry:
     ) -> Optional[ServiceInfo]:
         """Remove a service from the registry."""
 
-        return self._services.pop(service_id, None)
+        return self._services.pop(
+            service_id,
+            None,
+        )
 
     def remove_node_services(
         self,
@@ -122,7 +182,9 @@ class ServiceRegistry:
 
         removed: List[ServiceInfo] = []
 
-        for service_id, service in list(self._services.items()):
+        for service_id, service in list(
+            self._services.items()
+        ):
             if service.node_id == node_id:
                 removed.append(
                     self._services.pop(service_id)
