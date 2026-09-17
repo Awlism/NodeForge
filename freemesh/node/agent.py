@@ -430,6 +430,13 @@ class NodeAgent:
             )
             return
 
+        service = Service(
+            service_id=service_id,
+            command=command,
+        )
+
+        self._service_models[service_id] = service
+
         try:
             existing_process = self._services.get(
                 service_id
@@ -533,6 +540,7 @@ class NodeAgent:
                 service_id,
                 None,
             )
+            self._service_models.pop(service_id, None)
 
             await self._send_service_response(
                 MessageType.SERVICE_STOP_RESPONSE,
@@ -659,6 +667,7 @@ class NodeAgent:
                 pass
 
             self._services.pop(service_id, None)
+            self._service_models.pop(service_id, None)
 
         self._service_statuses.clear()
         self._service_commands.clear()
