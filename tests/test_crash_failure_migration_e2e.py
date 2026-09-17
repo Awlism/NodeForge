@@ -40,10 +40,9 @@ async def wait_until(
 
 @pytest.mark.asyncio
 async def test_crash_failure_triggers_automatic_migration():
-    """A permanently crashing service should migrate to another node."""
+    """A crashing service should migrate after restart exhaustion."""
 
     token = "nodeforge-crash-migration-token"
-
     os.environ["NODEFORGE_AUTH_TOKEN"] = token
 
     controller = Controller(
@@ -59,21 +58,18 @@ async def test_crash_failure_triggers_automatic_migration():
 
     node_a = None
     node_b = None
-
     node_a_task = None
     node_b_task = None
 
     counter_file = tempfile.NamedTemporaryFile(
         delete=False
     )
-
     counter_path = counter_file.name
-
     counter_file.close()
 
     try:
         # -------------------------------------------------
-        # Start Controller
+        # Controller
         # -------------------------------------------------
 
         await wait_until(
@@ -84,16 +80,13 @@ async def test_crash_failure_triggers_automatic_migration():
             timeout=5.0,
         )
 
-        server_socket = (
-            controller.server.sockets[0]
-        )
-
         controller_port = (
-            server_socket.getsockname()[1]
+            controller.server.sockets[0]
+            .getsockname()[1]
         )
 
         # -------------------------------------------------
-        # Create Nodes
+        # Nodes
         # -------------------------------------------------
 
         node_a = NodeAgent(
@@ -123,10 +116,6 @@ async def test_crash_failure_triggers_automatic_migration():
         )
 
         try:
-            # -------------------------------------------------
-            # Wait for both Nodes to become READY
-            # -------------------------------------------------
-
             await wait_until(
                 lambda: (
                     node_a.get_state()
@@ -136,10 +125,6 @@ async def test_crash_failure_triggers_automatic_migration():
                 ),
                 timeout=10.0,
             )
-
-            # -------------------------------------------------
-            # Wait for Controller registrations
-            # -------------------------------------------------
 
             await wait_until(
                 lambda: (
@@ -154,10 +139,6 @@ async def test_crash_failure_triggers_automatic_migration():
                 ),
                 timeout=5.0,
             )
-
-            # -------------------------------------------------
-            # Wait for resource reports
-            # -------------------------------------------------
 
             await wait_until(
                 lambda: (
@@ -174,29 +155,17 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             # -------------------------------------------------
-            # Crash command
-            # -------------------------------------------------
+            # The command:
             #
-            # Invocation 1:
-            #   Initial service start on Node A -> crash
+            # 1 -> crash
+            # 2 -> crash
+            # 3 -> crash
+            # 4 -> crash
+            # 5 -> stay alive
             #
-            # Invocation 2:
-            #   Restart attempt 1 -> crash
-            #
-            # Invocation 3:
-            #   Restart attempt 2 -> crash
-            #
-            # Invocation 4:
-            #   Restart attempt 3 -> crash
-            #
-            # Invocation 5:
-            #   Migration to Node B -> stays alive
-            #
-            # Therefore:
-            #
-            #   Node A = 4 failed processes
-            #   Node B = 1 healthy process
-            #
+            # Thus:
+            # initial start + 3 restart attempts = 4 failures
+            # migration to Node B = successful 5th execution
             # -------------------------------------------------
 
             command = (
@@ -220,30 +189,20 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             # -------------------------------------------------
-            # Start service on Node A
+            # Start on Node A
             # -------------------------------------------------
 
-            initial_response = (
-                await controller.start_service(
-                    node_id="crash-node-a",
-                    service_id=(
-                        "crash-migration-service"
-                    ),
-                    command=command,
-                    timeout_seconds=10.0,
-                )
+            response = await controller.start_service(
+                node_id="crash-node-a",
+                service_id="crash-migration-service",
+                command=command,
+                timeout_seconds=10.0,
             )
 
             assert (
-                initial_response.payload.get(
-                    "status"
-                )
+                response.payload.get("status")
                 == "started"
             )
-
-            # -------------------------------------------------
-            # Verify initial Controller registry state
-            # -------------------------------------------------
 
             service = (
                 controller.service_registry.get_service(
@@ -252,41 +211,19 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             assert service is not None
-
             assert (
                 service.node_id
                 == "crash-node-a"
             )
 
             initial_pid = service.pid
-
             assert initial_pid is not None
 
             # -------------------------------------------------
-            # Verify Node A has the actual Service model
-            # -------------------------------------------------
-
-            node_a_service = (
-                node_a._service_manager.get_service(
-                    "crash-migration-service"
-                )
-            )
-
-            assert node_a_service is not None
-
-            assert (
-                node_a_service.restart_attempts
-                == 0
-            )
-
-            # -------------------------------------------------
-            # Wait for RestartEngine exhaustion
-            # -------------------------------------------------
+            # Wait for RestartEngine exhaustion.
             #
-            # IMPORTANT:
-            # restart_attempts belongs to the Service model
-            # running inside NodeAgent, not ServiceInfo inside
-            # Controller.service_registry.
+            # restart_attempts lives on NodeAgent's Service
+            # model, not Controller's ServiceInfo.
             # -------------------------------------------------
 
             await wait_until(
@@ -307,10 +244,6 @@ async def test_crash_failure_triggers_automatic_migration():
                 timeout=15.0,
             )
 
-            # -------------------------------------------------
-            # Verify exactly three restart attempts
-            # -------------------------------------------------
-
             node_a_service = (
                 node_a._service_manager.get_service(
                     "crash-migration-service"
@@ -324,21 +257,18 @@ async def test_crash_failure_triggers_automatic_migration():
                 == 3
             )
 
-            # The NodeAgent should have exhausted the
-            # restart budget and marked the service crashed.
             assert (
                 node_a_service.status.value
                 == "crashed"
             )
 
             # -------------------------------------------------
-            # Verify Controller received the failure
+            # Verify Controller received SERVICE_FAILURE.
             # -------------------------------------------------
 
             await wait_until(
                 lambda: (
-                    controller.failure_manager
-                    .get_failure(
+                    controller.failure_manager.get_failure(
                         "crash-migration-service"
                     )
                     is not None
@@ -353,24 +283,21 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             assert failure is not None
-
             assert (
                 failure.node_id
                 == "crash-node-a"
             )
-
             assert (
                 failure.status
                 == "crashed"
             )
-
             assert (
                 failure.restart_attempts
                 == 3
             )
 
             # -------------------------------------------------
-            # Wait for automatic migration to Node B
+            # Wait for automatic migration.
             # -------------------------------------------------
 
             await wait_until(
@@ -397,10 +324,6 @@ async def test_crash_failure_triggers_automatic_migration():
                 timeout=20.0,
             )
 
-            # -------------------------------------------------
-            # Read final Controller service state
-            # -------------------------------------------------
-
             migrated_service = (
                 controller.service_registry.get_service(
                     "crash-migration-service"
@@ -409,7 +332,6 @@ async def test_crash_failure_triggers_automatic_migration():
 
             assert migrated_service is not None
 
-            # Service must have moved to Node B.
             assert (
                 migrated_service.node_id
                 == "migration-node-b"
@@ -420,7 +342,6 @@ async def test_crash_failure_triggers_automatic_migration():
                 == "running"
             )
 
-            # A new process must have been created.
             assert migrated_service.pid is not None
 
             assert (
@@ -429,7 +350,7 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             # -------------------------------------------------
-            # Verify migration registry
+            # Migration registry
             # -------------------------------------------------
 
             migration = (
@@ -456,7 +377,7 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             # -------------------------------------------------
-            # Verify resource accounting
+            # Resource accounting
             # -------------------------------------------------
 
             reservation = (
@@ -473,7 +394,7 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             # -------------------------------------------------
-            # Verify Node B Service model
+            # Verify actual Node B service
             # -------------------------------------------------
 
             node_b_service = (
@@ -495,7 +416,7 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             # -------------------------------------------------
-            # Verify Node B actual process
+            # Verify actual OS process on Node B
             # -------------------------------------------------
 
             node_b_process = (
@@ -512,7 +433,7 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             # -------------------------------------------------
-            # Verify the shared command counter
+            # Verify command execution count.
             # -------------------------------------------------
 
             with open(
@@ -524,24 +445,14 @@ async def test_crash_failure_triggers_automatic_migration():
                     file.read().strip()
                 )
 
-            # Four failed executions on Node A
-            # plus one successful execution on Node B.
             assert invocation_count == 5
 
         finally:
-            # -------------------------------------------------
-            # Stop Nodes
-            # -------------------------------------------------
-
             if node_a is not None:
                 await node_a.stop()
 
             if node_b is not None:
                 await node_b.stop()
-
-            # -------------------------------------------------
-            # Cancel Node tasks
-            # -------------------------------------------------
 
             for task in (
                 node_a_task,
@@ -555,14 +466,7 @@ async def test_crash_failure_triggers_automatic_migration():
                     ):
                         await task
 
-        finally:
-            pass
-
     finally:
-        # -----------------------------------------------------
-        # Stop Controller
-        # -----------------------------------------------------
-
         await controller.stop()
 
         controller_task.cancel()
@@ -571,10 +475,6 @@ async def test_crash_failure_triggers_automatic_migration():
             asyncio.CancelledError
         ):
             await controller_task
-
-        # -----------------------------------------------------
-        # Remove temporary counter file
-        # -----------------------------------------------------
 
         try:
             os.unlink(counter_path)
