@@ -88,6 +88,17 @@ class NodeAgent:
             ),
         }
 
+    async def _send_resource_report(self) -> None:
+        """Send the current resource information to the Controller."""
+
+        resource_report = BaseMessage(
+            type=MessageType.RESOURCE_REPORT,
+            message_id=str(uuid.uuid4()),
+            payload=self._collect_resource_payload(),
+        )
+
+        await self.transport.send(resource_report)
+
     async def start(self) -> None:
         """Start the node agent."""
 
@@ -110,6 +121,8 @@ class NodeAgent:
                 await self._register_and_authenticate()
 
                 self.state = AgentState.READY
+
+                await self._send_resource_report()
 
                 self._receive_task = asyncio.create_task(
                     self._receive_loop()
@@ -269,6 +282,9 @@ class NodeAgent:
             if message.type == MessageType.HEARTBEAT_RESPONSE:
                 continue
 
+            if message.type == MessageType.RESOURCE_REPORT_RESPONSE:
+                continue
+
             if message.type == MessageType.SERVICE_START:
                 await self._handle_service_start(message)
 
@@ -279,7 +295,7 @@ class NodeAgent:
                 await self._handle_service_status(message)
 
     async def _heartbeat_loop(self) -> None:
-        """Send periodic heartbeats."""
+        """Send periodic heartbeats and resource reports."""
 
         while self._running:
             await asyncio.sleep(
@@ -298,6 +314,14 @@ class NodeAgent:
             )
 
             await self.transport.send(heartbeat)
+
+            resource_report = BaseMessage(
+                type=MessageType.RESOURCE_REPORT,
+                message_id=str(uuid.uuid4()),
+                payload=self._collect_resource_payload(),
+            )
+
+            await self.transport.send(resource_report)
 
     async def _service_monitor_loop(self) -> None:
         """Monitor service processes and restart crashed services."""
@@ -562,12 +586,15 @@ class NodeAgent:
 
     def get_state(self) -> AgentState:
         """Return the current agent state."""
+
         return self.state
 
     async def is_connected(self) -> bool:
         """Return whether the transport is connected."""
+
         return await self.transport.is_connected()
 
     def is_running(self) -> bool:
         """Return whether the agent is running."""
+
         return self._running
