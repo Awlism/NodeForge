@@ -6,21 +6,49 @@ from typing import Dict, Optional
 
 from freemesh.controller.failure_manager import FailureManager
 from freemesh.controller.failover_manager import FailoverManager
-from freemesh.controller.node_registry import NodeRegistry, NodeState
-from freemesh.controller.resource_failover import ResourceFailover
-from freemesh.controller.resource_registry import ResourceRegistry
-from freemesh.controller.service_placement import ServicePlacement
-from freemesh.controller.service_registry import ServiceRegistry
+from freemesh.controller.migration_manager import (
+    MigrationManager,
+)
+from freemesh.controller.migration_registry import (
+    MigrationRegistry,
+)
+from freemesh.controller.node_registry import (
+    NodeRegistry,
+    NodeState,
+)
+from freemesh.controller.resource_accounting import (
+    ResourceAccounting,
+)
+from freemesh.controller.resource_failover import (
+    ResourceFailover,
+)
+from freemesh.controller.resource_registry import (
+    ResourceRegistry,
+)
+from freemesh.controller.service_placement import (
+    ServicePlacement,
+)
+from freemesh.controller.service_registry import (
+    ServiceRegistry,
+)
 from freemesh.node.resources import NodeResources
-from freemesh.protocol.messages import BaseMessage, MessageType
+from freemesh.protocol.messages import (
+    BaseMessage,
+    MessageType,
+)
 from freemesh.protocol.transport import TCPTransport
 from freemesh.scheduler.resource_scheduler import (
     ResourceNodeCandidate,
     ResourceScheduler,
 )
 from freemesh.scheduler.scheduler import NodeCandidate
-from freemesh.security.auth import Authenticator, AuthenticationError
-from freemesh.service_requirements import ServiceRequirements
+from freemesh.security.auth import (
+    Authenticator,
+    AuthenticationError,
+)
+from freemesh.service_requirements import (
+    ServiceRequirements,
+)
 
 
 class Controller:
@@ -35,7 +63,9 @@ class Controller:
     ):
         self.host = host
         self.port = port
-        self.heartbeat_timeout_seconds = heartbeat_timeout_seconds
+        self.heartbeat_timeout_seconds = (
+            heartbeat_timeout_seconds
+        )
         self.authenticator = authenticator
 
         self.registry = NodeRegistry()
@@ -54,23 +84,49 @@ class Controller:
             scheduler=self.resource_scheduler,
         )
 
+        self.resource_accounting = ResourceAccounting()
+
+        self.migration_manager = MigrationManager(
+            accounting=self.resource_accounting,
+        )
+
+        self.migration_registry = MigrationRegistry()
+
         self.server: Optional[asyncio.Server] = None
         self._running = False
-        self._offline_detection_task: Optional[asyncio.Task] = None
-        self._service_health_task: Optional[asyncio.Task] = None
+
+        self._offline_detection_task: Optional[
+            asyncio.Task
+        ] = None
+
+        self._service_health_task: Optional[
+            asyncio.Task
+        ] = None
 
         self.service_health_interval_seconds = 2.0
 
-        self._active_nodes: Dict[str, TCPTransport] = {}
+        self._active_nodes: Dict[
+            str,
+            TCPTransport,
+        ] = {}
 
-        self._service_responses: Dict[str, BaseMessage] = {}
-        self._service_response_events: Dict[str, asyncio.Event] = {}
+        self._service_responses: Dict[
+            str,
+            BaseMessage,
+        ] = {}
+
+        self._service_response_events: Dict[
+            str,
+            asyncio.Event,
+        ] = {}
 
     async def start(self) -> None:
         """Start the controller."""
 
         if self.server is not None:
-            raise RuntimeError("Controller is already running")
+            raise RuntimeError(
+                "Controller is already running"
+            )
 
         self._running = True
 
@@ -80,12 +136,16 @@ class Controller:
             self.port,
         )
 
-        self._offline_detection_task = asyncio.create_task(
-            self._run_offline_detection()
+        self._offline_detection_task = (
+            asyncio.create_task(
+                self._run_offline_detection()
+            )
         )
 
-        self._service_health_task = asyncio.create_task(
-            self._run_service_health_monitor()
+        self._service_health_task = (
+            asyncio.create_task(
+                self._run_service_health_monitor()
+            )
         )
 
         async with self.server:
@@ -121,7 +181,9 @@ class Controller:
             await self.server.wait_closed()
             self.server = None
 
-        for transport in list(self._active_nodes.values()):
+        for transport in list(
+            self._active_nodes.values()
+        ):
             try:
                 await transport.disconnect()
             except Exception:
@@ -129,13 +191,16 @@ class Controller:
 
         self._active_nodes.clear()
 
-        for event in self._service_response_events.values():
+        for event in (
+            self._service_response_events.values()
+        ):
             event.set()
 
         self._service_response_events.clear()
         self._service_responses.clear()
 
         self.resource_registry.clear()
+        self.resource_accounting.clear()
 
     async def _handle_client_connection(
         self,
@@ -151,7 +216,9 @@ class Controller:
         node_id: Optional[str] = None
 
         try:
-            register_message = await transport.receive()
+            register_message = (
+                await transport.receive()
+            )
 
             if register_message is None:
                 return
@@ -169,10 +236,12 @@ class Controller:
             if auth_message is None:
                 return
 
-            authenticated = await self._handle_authentication(
-                auth_message,
-                node_id,
-                transport,
+            authenticated = (
+                await self._handle_authentication(
+                    auth_message,
+                    node_id,
+                    transport,
+                )
             )
 
             if not authenticated:
@@ -197,7 +266,10 @@ class Controller:
 
         finally:
             if node_id:
-                self._active_nodes.pop(node_id, None)
+                self._active_nodes.pop(
+                    node_id,
+                    None,
+                )
 
             if node_id:
                 self.resource_registry.remove_resources(
@@ -222,7 +294,10 @@ class Controller:
                 },
             )
 
-            await transport.send(error_response)
+            await transport.send(
+                error_response
+            )
+
             return None
 
         payload = message.payload
@@ -236,13 +311,20 @@ class Controller:
                 },
             )
 
-            await transport.send(error_response)
+            await transport.send(
+                error_response
+            )
+
             return None
 
         node_id = payload.get("node_id")
         hostname = payload.get("hostname")
-        connection_address = payload.get("connection_address")
-        connection_port = payload.get("connection_port")
+        connection_address = payload.get(
+            "connection_address"
+        )
+        connection_port = payload.get(
+            "connection_port"
+        )
 
         if not node_id or not hostname:
             error_response = BaseMessage(
@@ -256,14 +338,19 @@ class Controller:
                 },
             )
 
-            await transport.send(error_response)
+            await transport.send(
+                error_response
+            )
+
             return None
 
         try:
             self.registry.register_node(
                 node_id=node_id,
                 hostname=hostname,
-                connection_address=connection_address,
+                connection_address=(
+                    connection_address
+                ),
                 connection_port=connection_port,
             )
 
@@ -289,7 +376,9 @@ class Controller:
                 },
             )
 
-            await transport.send(error_response)
+            await transport.send(
+                error_response
+            )
 
             return None
 
@@ -307,11 +396,15 @@ class Controller:
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "failed",
-                    "error": "Expected AUTHENTICATE message",
+                    "error": (
+                        "Expected AUTHENTICATE message"
+                    ),
                 },
             )
 
-            await transport.send(error_response)
+            await transport.send(
+                error_response
+            )
 
             self.registry.update_node_state(
                 node_id,
@@ -332,7 +425,9 @@ class Controller:
                 },
             )
 
-            await transport.send(error_response)
+            await transport.send(
+                error_response
+            )
 
             self.registry.update_node_state(
                 node_id,
@@ -341,7 +436,9 @@ class Controller:
 
             return False
 
-        credentials = payload.get("token") or payload.get(
+        credentials = payload.get(
+            "token"
+        ) or payload.get(
             "credentials"
         )
 
@@ -351,11 +448,15 @@ class Controller:
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "failed",
-                    "error": "No authenticator configured",
+                    "error": (
+                        "No authenticator configured"
+                    ),
                 },
             )
 
-            await transport.send(error_response)
+            await transport.send(
+                error_response
+            )
 
             self.registry.update_node_state(
                 node_id,
@@ -365,8 +466,10 @@ class Controller:
             return False
 
         try:
-            authenticated = self.authenticator.authenticate(
-                credentials
+            authenticated = (
+                self.authenticator.authenticate(
+                    credentials
+                )
             )
 
             if authenticated:
@@ -376,7 +479,9 @@ class Controller:
                 )
 
                 response = BaseMessage(
-                    type=MessageType.AUTHENTICATE_RESPONSE,
+                    type=(
+                        MessageType.AUTHENTICATE_RESPONSE
+                    ),
                     message_id=str(uuid.uuid4()),
                     payload={
                         "status": "authenticated",
@@ -384,7 +489,9 @@ class Controller:
                     },
                 )
 
-                await transport.send(response)
+                await transport.send(
+                    response
+                )
 
                 return True
 
@@ -402,7 +509,9 @@ class Controller:
                 },
             )
 
-            await transport.send(error_response)
+            await transport.send(
+                error_response
+            )
 
             return False
 
@@ -421,7 +530,9 @@ class Controller:
                 },
             )
 
-            await transport.send(error_response)
+            await transport.send(
+                error_response
+            )
 
             return False
 
@@ -430,7 +541,7 @@ class Controller:
         node_id: str,
         transport: TCPTransport,
     ) -> None:
-        """Receive and dispatch all messages from an authenticated node."""
+        """Receive and dispatch node messages."""
 
         while self._running:
             try:
@@ -446,7 +557,10 @@ class Controller:
                         transport,
                     )
 
-                elif message.type == MessageType.RESOURCE_REPORT:
+                elif (
+                    message.type
+                    == MessageType.RESOURCE_REPORT
+                ):
                     await self._handle_resource_report(
                         node_id,
                         message,
@@ -463,7 +577,10 @@ class Controller:
                         node_id=node_id,
                     )
 
-                elif message.type == MessageType.SERVICE_FAILURE:
+                elif (
+                    message.type
+                    == MessageType.SERVICE_FAILURE
+                ):
                     await self._handle_service_failure(
                         node_id=node_id,
                         message=message,
@@ -500,7 +617,9 @@ class Controller:
         if payload.get("node_id") != node_id:
             return
 
-        self.registry.record_heartbeat(node_id)
+        self.registry.record_heartbeat(
+            node_id
+        )
 
         response = BaseMessage(
             type=MessageType.HEARTBEAT_RESPONSE,
@@ -519,19 +638,23 @@ class Controller:
         message: BaseMessage,
         transport: TCPTransport,
     ) -> None:
-        """Handle a resource report from an authenticated node."""
+        """Handle a resource report from a node."""
 
         payload = message.payload
 
         if not isinstance(payload, dict):
             response = BaseMessage(
-                type=MessageType.RESOURCE_REPORT_RESPONSE,
+                type=(
+                    MessageType.RESOURCE_REPORT_RESPONSE
+                ),
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "failed",
                     "node_id": node_id,
                     "request_id": message.message_id,
-                    "error": "Invalid payload format",
+                    "error": (
+                        "Invalid payload format"
+                    ),
                 },
             )
 
@@ -540,7 +663,9 @@ class Controller:
 
         if payload.get("node_id") != node_id:
             response = BaseMessage(
-                type=MessageType.RESOURCE_REPORT_RESPONSE,
+                type=(
+                    MessageType.RESOURCE_REPORT_RESPONSE
+                ),
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "failed",
@@ -559,19 +684,29 @@ class Controller:
                     payload["cpu_cores"]
                 ),
                 cpu_usage_percent=float(
-                    payload["cpu_usage_percent"]
+                    payload[
+                        "cpu_usage_percent"
+                    ]
                 ),
                 memory_total_mb=int(
-                    payload["memory_total_mb"]
+                    payload[
+                        "memory_total_mb"
+                    ]
                 ),
                 memory_used_mb=int(
-                    payload["memory_used_mb"]
+                    payload[
+                        "memory_used_mb"
+                    ]
                 ),
                 disk_total_gb=float(
-                    payload["disk_total_gb"]
+                    payload[
+                        "disk_total_gb"
+                    ]
                 ),
                 disk_used_gb=float(
-                    payload["disk_used_gb"]
+                    payload[
+                        "disk_used_gb"
+                    ]
                 ),
                 running_services=int(
                     payload.get(
@@ -586,7 +721,9 @@ class Controller:
                     "cpu_cores cannot be negative"
                 )
 
-            if not 0 <= resources.cpu_usage_percent <= 100:
+            if not 0 <= (
+                resources.cpu_usage_percent
+            ) <= 100:
                 raise ValueError(
                     "cpu_usage_percent must be between 0 and 100"
                 )
@@ -622,12 +759,16 @@ class Controller:
             )
 
             response = BaseMessage(
-                type=MessageType.RESOURCE_REPORT_RESPONSE,
+                type=(
+                    MessageType.RESOURCE_REPORT_RESPONSE
+                ),
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "accepted",
                     "node_id": node_id,
-                    "request_id": message.message_id,
+                    "request_id": (
+                        message.message_id
+                    ),
                     "running_services": (
                         resources.running_services
                     ),
@@ -640,12 +781,16 @@ class Controller:
             ValueError,
         ) as exc:
             response = BaseMessage(
-                type=MessageType.RESOURCE_REPORT_RESPONSE,
+                type=(
+                    MessageType.RESOURCE_REPORT_RESPONSE
+                ),
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "failed",
                     "node_id": node_id,
-                    "request_id": message.message_id,
+                    "request_id": (
+                        message.message_id
+                    ),
                     "error": str(exc),
                 },
             )
@@ -657,25 +802,55 @@ class Controller:
         message: BaseMessage,
         node_id: Optional[str] = None,
     ) -> None:
-        """Store a service response and update the service registry."""
+        """Store response and update service state."""
 
-        request_id = message.payload.get("request_id")
+        request_id = message.payload.get(
+            "request_id"
+        )
 
         if not request_id:
             request_id = message.message_id
 
-        self._service_responses[request_id] = message
+        self._service_responses[
+            request_id
+        ] = message
 
-        service_id = message.payload.get("service_id")
+        service_id = message.payload.get(
+            "service_id"
+        )
 
         if service_id:
-            if message.type == MessageType.SERVICE_START_RESPONSE:
+            if (
+                message.type
+                == MessageType.SERVICE_START_RESPONSE
+            ):
                 resolved_node_id = (
                     node_id
-                    or message.payload.get("node_id")
+                    or message.payload.get(
+                        "node_id"
+                    )
                 )
 
                 if resolved_node_id:
+                    requirements_payload = (
+                        message.payload.get(
+                            "requirements",
+                            {},
+                        )
+                    )
+
+                    if not isinstance(
+                        requirements_payload,
+                        dict,
+                    ):
+                        requirements_payload = {}
+
+                    requirements = (
+                        ServiceRequirements.from_dict(
+                            requirements_payload
+                        )
+                    )
+
                     self.service_registry.register_service(
                         service_id=service_id,
                         node_id=resolved_node_id,
@@ -683,11 +858,19 @@ class Controller:
                             "status",
                             "started",
                         ),
-                        pid=message.payload.get("pid"),
-                        command=message.payload.get("command"),
+                        pid=message.payload.get(
+                            "pid"
+                        ),
+                        command=message.payload.get(
+                            "command"
+                        ),
+                        requirements=requirements,
                     )
 
-            elif message.type == MessageType.SERVICE_STATUS_RESPONSE:
+            elif (
+                message.type
+                == MessageType.SERVICE_STATUS_RESPONSE
+            ):
                 existing_service = (
                     self.service_registry.get_service(
                         service_id
@@ -707,7 +890,10 @@ class Controller:
                         ),
                     )
 
-            elif message.type == MessageType.SERVICE_STOP_RESPONSE:
+            elif (
+                message.type
+                == MessageType.SERVICE_STOP_RESPONSE
+            ):
                 existing_service = (
                     self.service_registry.get_service(
                         service_id
@@ -724,7 +910,11 @@ class Controller:
                         pid=None,
                     )
 
-        event = self._service_response_events.get(request_id)
+        event = (
+            self._service_response_events.get(
+                request_id
+            )
+        )
 
         if event:
             event.set()
@@ -733,7 +923,7 @@ class Controller:
         self,
         exclude_node_id: Optional[str] = None,
     ) -> list[ResourceNodeCandidate]:
-        """Build scheduler candidates from authenticated online nodes."""
+        """Build candidates from authenticated online nodes."""
 
         candidates = []
 
@@ -747,8 +937,10 @@ class Controller:
             if node.node_id == exclude_node_id:
                 continue
 
-            resources = self.resource_registry.get_resources(
-                node.node_id
+            resources = (
+                self.resource_registry.get_resources(
+                    node.node_id
+                )
             )
 
             if resources is None:
@@ -758,7 +950,8 @@ class Controller:
                 ResourceNodeCandidate(
                     node_id=node.node_id,
                     available=(
-                        node.node_id in self._active_nodes
+                        node.node_id
+                        in self._active_nodes
                     ),
                     running_services=len(
                         self.service_registry.list_node_services(
@@ -778,7 +971,7 @@ class Controller:
         required_disk_gb: float = 0.0,
         exclude_node_id: Optional[str] = None,
     ) -> Optional[ResourceNodeCandidate]:
-        """Select a node with enough resources for a service."""
+        """Select a node with enough resources."""
 
         requirements = ServiceRequirements(
             cpu_cores=required_cpu_cores,
@@ -790,9 +983,11 @@ class Controller:
             exclude_node_id=exclude_node_id,
         )
 
-        return self.resource_scheduler.select_node_for_requirements(
-            nodes=candidates,
-            requirements=requirements,
+        return (
+            self.resource_scheduler.select_node_for_requirements(
+                nodes=candidates,
+                requirements=requirements,
+            )
         )
 
     async def start_service_auto(
@@ -804,13 +999,17 @@ class Controller:
         required_disk_gb: float = 0.0,
         timeout_seconds: float = 10.0,
     ) -> BaseMessage:
-        """Select a suitable node and start a service on it."""
+        """Select a suitable node and start a service."""
 
         if not service_id:
-            raise ValueError("service_id is required")
+            raise ValueError(
+                "service_id is required"
+            )
 
         if not command:
-            raise ValueError("command is required")
+            raise ValueError(
+                "command is required"
+            )
 
         requirements = ServiceRequirements(
             cpu_cores=required_cpu_cores,
@@ -844,12 +1043,16 @@ class Controller:
         node_id: str,
         service_id: str,
         command: str,
-        requirements: Optional[ServiceRequirements] = None,
+        requirements: Optional[
+            ServiceRequirements
+        ] = None,
         timeout_seconds: float = 10.0,
     ) -> BaseMessage:
         """Request a node to start a service."""
 
-        transport = self._active_nodes.get(node_id)
+        transport = self._active_nodes.get(
+            node_id
+        )
 
         if transport is None:
             raise RuntimeError(
@@ -857,10 +1060,14 @@ class Controller:
             )
 
         if not service_id:
-            raise ValueError("service_id is required")
+            raise ValueError(
+                "service_id is required"
+            )
 
         if not command:
-            raise ValueError("command is required")
+            raise ValueError(
+                "command is required"
+            )
 
         if requirements is None:
             requirements = ServiceRequirements()
@@ -877,7 +1084,9 @@ class Controller:
 
         event = asyncio.Event()
 
-        self._service_response_events[request_id] = event
+        self._service_response_events[
+            request_id
+        ] = event
 
         message = BaseMessage(
             type=MessageType.SERVICE_START,
@@ -885,7 +1094,9 @@ class Controller:
             payload={
                 "service_id": service_id,
                 "command": command,
-                "requirements": requirements.to_dict(),
+                "requirements": (
+                    requirements.to_dict()
+                ),
                 "request_id": request_id,
             },
         )
@@ -898,21 +1109,54 @@ class Controller:
                 timeout=timeout_seconds,
             )
 
-            response = self._service_responses.get(request_id)
+            response = (
+                self._service_responses.get(
+                    request_id
+                )
+            )
 
             if response is None:
                 raise RuntimeError(
                     "Service start response was not received"
                 )
 
-            if response.payload.get("status") == "started":
+            if (
+                response.payload.get(
+                    "status"
+                )
+                == "started"
+            ):
                 self.service_registry.register_service(
                     service_id=service_id,
                     node_id=node_id,
                     status="running",
-                    pid=response.payload.get("pid"),
+                    pid=response.payload.get(
+                        "pid"
+                    ),
                     command=command,
+                    requirements=requirements,
                 )
+
+                existing_reservation = (
+                    self.resource_accounting.get(
+                        service_id
+                    )
+                )
+
+                if existing_reservation is None:
+                    self.migration_manager.reserve_service(
+                        service_id=service_id,
+                        node_id=node_id,
+                        requirements=requirements,
+                    )
+                elif (
+                    existing_reservation.node_id
+                    != node_id
+                ):
+                    self.migration_manager.migrate_reservation(
+                        service_id=service_id,
+                        target_node_id=node_id,
+                    )
 
             return response
 
@@ -933,13 +1177,23 @@ class Controller:
         failed_node_id: str,
         timeout_seconds: float = 10.0,
     ) -> Optional[BaseMessage]:
-        """Migrate a failed service to a resource-capable node."""
+        """Perform a complete resource-aware migration."""
 
-        service = self.service_registry.get_service(
-            service_id
+        service = (
+            self.service_registry.get_service(
+                service_id
+            )
         )
 
         if service is None:
+            return None
+
+        if service.node_id != failed_node_id:
+            return None
+
+        if self.migration_manager.is_migrating(
+            service_id
+        ):
             return None
 
         command = service.command
@@ -963,41 +1217,144 @@ class Controller:
             exclude_node_id=failed_node_id,
         )
 
-        plan = self.resource_failover.create_migration_plan(
-            service_id=service_id,
-            source_node_id=failed_node_id,
-            command=command,
-            requirements=requirements,
-            nodes=candidates,
+        plan = (
+            self.resource_failover.create_migration_plan(
+                service_id=service_id,
+                source_node_id=failed_node_id,
+                command=command,
+                requirements=requirements,
+                nodes=candidates,
+            )
         )
 
         if plan is None:
             return None
 
-        response = await self.start_service(
-            node_id=plan.target_node_id,
+        self.migration_registry.start(
             service_id=plan.service_id,
-            command=plan.command,
-            requirements=plan.requirements,
-            timeout_seconds=timeout_seconds,
+            source_node_id=plan.source_node_id,
+            target_node_id=plan.target_node_id,
         )
 
-        if response.payload.get("status") != "started":
-            return response
+        async def start_target(
+            node_id,
+            service_id,
+            command,
+            requirements,
+        ):
+            return await self.start_service(
+                node_id=node_id,
+                service_id=service_id,
+                command=command,
+                requirements=requirements,
+                timeout_seconds=timeout_seconds,
+            )
 
-        self.service_registry.register_service(
-            service_id=plan.service_id,
-            node_id=plan.target_node_id,
-            status="running",
-            pid=response.payload.get("pid"),
-            command=plan.command,
+        async def verify_target(
+            node_id,
+            service_id,
+        ):
+            try:
+                response = await self.status_service(
+                    node_id=node_id,
+                    service_id=service_id,
+                    timeout_seconds=timeout_seconds,
+                )
+
+                return (
+                    response.payload.get(
+                        "status"
+                    )
+                    in {
+                        "running",
+                        "started",
+                    }
+                )
+
+            except (
+                RuntimeError,
+                TimeoutError,
+                KeyError,
+            ):
+                return False
+
+        result = await self.migration_manager.execute(
+            plan=plan,
+            start_service=start_target,
+            verify_service=verify_target,
         )
 
-        self.failure_manager.clear_failure(
-            service_id
+        if result.status == "migrated":
+            self.service_registry.move_service(
+                service_id=service_id,
+                node_id=plan.target_node_id,
+                pid=result.pid,
+                status="running",
+            )
+
+            self.service_registry.update_service(
+                service_id=service_id,
+                command=plan.command,
+                requirements=plan.requirements,
+            )
+
+            self.migration_registry.complete(
+                service_id=service_id,
+                pid=result.pid,
+            )
+
+            self.failure_manager.clear_failure(
+                service_id
+            )
+
+            return BaseMessage(
+                type=(
+                    MessageType.SERVICE_START_RESPONSE
+                ),
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "status": "migrated",
+                    "service_id": service_id,
+                    "source_node_id": (
+                        failed_node_id
+                    ),
+                    "target_node_id": (
+                        plan.target_node_id
+                    ),
+                    "pid": result.pid,
+                    "command": plan.command,
+                    "requirements": (
+                        plan.requirements.to_dict()
+                    ),
+                },
+            )
+
+        self.migration_registry.fail(
+            service_id=service_id,
+            error=(
+                result.error
+                or "Migration failed"
+            ),
+            status=result.status,
         )
 
-        return response
+        return BaseMessage(
+            type=(
+                MessageType.SERVICE_START_RESPONSE
+            ),
+            message_id=str(uuid.uuid4()),
+            payload={
+                "status": result.status,
+                "service_id": service_id,
+                "source_node_id": (
+                    failed_node_id
+                ),
+                "target_node_id": (
+                    plan.target_node_id
+                ),
+                "error": result.error,
+            },
+        )
 
     async def stop_service(
         self,
@@ -1007,7 +1364,9 @@ class Controller:
     ) -> BaseMessage:
         """Request a node to stop a service."""
 
-        transport = self._active_nodes.get(node_id)
+        transport = self._active_nodes.get(
+            node_id
+        )
 
         if transport is None:
             raise RuntimeError(
@@ -1018,7 +1377,9 @@ class Controller:
 
         event = asyncio.Event()
 
-        self._service_response_events[request_id] = event
+        self._service_response_events[
+            request_id
+        ] = event
 
         message = BaseMessage(
             type=MessageType.SERVICE_STOP,
@@ -1037,11 +1398,34 @@ class Controller:
                 timeout=timeout_seconds,
             )
 
-            response = self._service_responses.get(request_id)
+            response = (
+                self._service_responses.get(
+                    request_id
+                )
+            )
 
             if response is None:
                 raise RuntimeError(
                     "Service stop response was not received"
+                )
+
+            if response.payload.get(
+                "status"
+            ) in {
+                "stopped",
+                "success",
+            }:
+                self.resource_accounting.release(
+                    service_id
+                )
+
+                self.service_registry.update_service(
+                    service_id=service_id,
+                    status=response.payload.get(
+                        "status",
+                        "stopped",
+                    ),
+                    pid=None,
                 )
 
             return response
@@ -1063,9 +1447,11 @@ class Controller:
         service_id: str,
         timeout_seconds: float = 10.0,
     ) -> BaseMessage:
-        """Request the current status of a service."""
+        """Request the current service status."""
 
-        transport = self._active_nodes.get(node_id)
+        transport = self._active_nodes.get(
+            node_id
+        )
 
         if transport is None:
             raise RuntimeError(
@@ -1076,7 +1462,9 @@ class Controller:
 
         event = asyncio.Event()
 
-        self._service_response_events[request_id] = event
+        self._service_response_events[
+            request_id
+        ] = event
 
         message = BaseMessage(
             type=MessageType.SERVICE_STATUS,
@@ -1095,7 +1483,11 @@ class Controller:
                 timeout=timeout_seconds,
             )
 
-            response = self._service_responses.get(request_id)
+            response = (
+                self._service_responses.get(
+                    request_id
+                )
+            )
 
             if response is None:
                 raise RuntimeError(
@@ -1127,13 +1519,22 @@ class Controller:
         if not isinstance(payload, dict):
             return
 
-        service_id = payload.get("service_id")
+        service_id = payload.get(
+            "service_id"
+        )
 
         if not service_id:
             return
 
-        status = payload.get("status", "crashed")
-        reason = payload.get("error")
+        status = payload.get(
+            "status",
+            "crashed",
+        )
+
+        reason = payload.get(
+            "error"
+        )
+
         restart_attempts = payload.get(
             "restart_attempts",
             0,
@@ -1147,8 +1548,10 @@ class Controller:
             restart_attempts=restart_attempts,
         )
 
-        service = self.service_registry.get_service(
-            service_id
+        service = (
+            self.service_registry.get_service(
+                service_id
+            )
         )
 
         if service is None:
@@ -1164,11 +1567,14 @@ class Controller:
                 service_id=service.service_id,
                 failed_node_id=node_id,
             )
+
         except Exception:
             return
 
-    async def _run_service_health_monitor(self) -> None:
-        """Monitor registered services and refresh their runtime status."""
+    async def _run_service_health_monitor(
+        self,
+    ) -> None:
+        """Monitor registered services."""
 
         while self._running:
             try:
@@ -1179,10 +1585,18 @@ class Controller:
                 if not self._running:
                     break
 
-                services = self.service_registry.list_services()
+                services = (
+                    self.service_registry.list_services()
+                )
 
                 for service in services:
                     try:
+                        if service.status in {
+                            "stopped",
+                            "failed",
+                        }:
+                            continue
+
                         await self.status_service(
                             node_id=service.node_id,
                             service_id=service.service_id,
@@ -1201,20 +1615,25 @@ class Controller:
             except Exception:
                 continue
 
-    async def _run_offline_detection(self) -> None:
-        """Run the offline node detection loop."""
+    async def _run_offline_detection(
+        self,
+    ) -> None:
+        """Run offline node detection."""
 
         while self._running:
             try:
                 await asyncio.sleep(
-                    self.heartbeat_timeout_seconds / 2
+                    self.heartbeat_timeout_seconds
+                    / 2
                 )
 
                 if not self._running:
                     break
 
-                offline_nodes = self.registry.detect_offline_nodes(
-                    self.heartbeat_timeout_seconds
+                offline_nodes = (
+                    self.registry.detect_offline_nodes(
+                        self.heartbeat_timeout_seconds
+                    )
                 )
 
                 for node_info in offline_nodes:
