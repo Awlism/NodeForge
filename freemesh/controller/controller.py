@@ -7,6 +7,7 @@ from typing import Dict, Optional
 from freemesh.controller.failure_manager import FailureManager
 from freemesh.controller.failover_manager import FailoverManager
 from freemesh.controller.node_registry import NodeRegistry, NodeState
+from freemesh.controller.resource_failover import ResourceFailover
 from freemesh.controller.resource_registry import ResourceRegistry
 from freemesh.controller.service_placement import ServicePlacement
 from freemesh.controller.service_registry import ServiceRegistry
@@ -41,10 +42,15 @@ class Controller:
         self.resource_registry = ResourceRegistry()
         self.service_registry = ServiceRegistry()
         self.failure_manager = FailureManager()
+
         self.failover_manager = FailoverManager()
         self.resource_scheduler = ResourceScheduler()
 
         self.service_placement = ServicePlacement(
+            scheduler=self.resource_scheduler,
+        )
+
+        self.resource_failover = ResourceFailover(
             scheduler=self.resource_scheduler,
         )
 
@@ -243,7 +249,10 @@ class Controller:
                 type=MessageType.ERROR,
                 message_id=str(uuid.uuid4()),
                 payload={
-                    "error": "Missing required fields: node_id, hostname",
+                    "error": (
+                        "Missing required fields: "
+                        "node_id, hostname"
+                    ),
                 },
             )
 
@@ -332,7 +341,9 @@ class Controller:
 
             return False
 
-        credentials = payload.get("token") or payload.get("credentials")
+        credentials = payload.get("token") or payload.get(
+            "credentials"
+        )
 
         if self.authenticator is None:
             error_response = BaseMessage(
@@ -718,104 +729,6 @@ class Controller:
         if event:
             event.set()
 
-    async def _handle_service_failure(
-        self,
-        node_id: str,
-        message: BaseMessage,
-    ) -> None:
-        """Handle a terminal service failure."""
-
-        payload = message.payload
-
-        if not isinstance(payload, dict):
-            return
-
-        service_id = payload.get("service_id")
-
-        if not service_id:
-            return
-
-        status = payload.get("status", "crashed")
-        reason = payload.get("error")
-        restart_attempts = payload.get(
-            "restart_attempts",
-            0,
-        )
-
-        self.failure_manager.record_failure(
-            service_id=service_id,
-            node_id=node_id,
-            status=status,
-            reason=reason,
-            restart_attempts=restart_attempts,
-        )
-
-        service = self.service_registry.get_service(
-            service_id
-        )
-
-        if service is None:
-            return
-
-        self.service_registry.update_service(
-            service_id=service_id,
-            status=status,
-        )
-
-        nodes = []
-
-        for node in self.registry.list_nodes():
-            if node.state != NodeState.ONLINE:
-                continue
-
-            if not node.authenticated:
-                continue
-
-            nodes.append(
-                NodeCandidate(
-                    node_id=node.node_id,
-                    available=True,
-                    running_services=len(
-                        self.service_registry.list_node_services(
-                            node.node_id
-                        )
-                    ),
-                )
-            )
-
-        replacement = (
-            self.failover_manager.select_replacement_node(
-                nodes=nodes,
-                failed_node_id=node_id,
-            )
-        )
-
-        if replacement is None:
-            return
-
-        try:
-            response = await self.start_service(
-                node_id=replacement.node_id,
-                service_id=service.service_id,
-                command=service.command or "",
-            )
-
-            if response.payload.get("status") == "started":
-                self.service_registry.register_service(
-                    service_id=service.service_id,
-                    node_id=replacement.node_id,
-                    status="running",
-                    pid=response.payload.get("pid"),
-                    command=service.command,
-                )
-
-                self.failure_manager.clear_failure(
-                    service.service_id
-                )
-
-        except Exception:
-            return
-
     def _build_resource_candidates(
         self,
         exclude_node_id: Optional[str] = None,
@@ -1014,6 +927,78 @@ class Controller:
                 None,
             )
 
+    async def migrate_service(
+        self,
+        service_id: str,
+        failed_node_id: str,
+        timeout_seconds: float = 10.0,
+    ) -> Optional[BaseMessage]:
+        """Migrate a failed service to a resource-capable node."""
+
+        service = self.service_registry.get_service(
+            service_id
+        )
+
+        if service is None:
+            return None
+
+        command = service.command
+
+        if not command:
+            return None
+
+        requirements = getattr(
+            service,
+            "requirements",
+            ServiceRequirements(),
+        )
+
+        if not isinstance(
+            requirements,
+            ServiceRequirements,
+        ):
+            requirements = ServiceRequirements()
+
+        candidates = self._build_resource_candidates(
+            exclude_node_id=failed_node_id,
+        )
+
+        plan = self.resource_failover.create_migration_plan(
+            service_id=service_id,
+            source_node_id=failed_node_id,
+            command=command,
+            requirements=requirements,
+            nodes=candidates,
+        )
+
+        if plan is None:
+            return None
+
+        response = await self.start_service(
+            node_id=plan.target_node_id,
+            service_id=plan.service_id,
+            command=plan.command,
+            requirements=plan.requirements,
+            timeout_seconds=timeout_seconds,
+        )
+
+        if response.payload.get("status") != "started":
+            return response
+
+        self.service_registry.register_service(
+            service_id=plan.service_id,
+            node_id=plan.target_node_id,
+            status="running",
+            pid=response.payload.get("pid"),
+            command=plan.command,
+        )
+
+        self.failure_manager.clear_failure(
+            service_id
+        )
+
+        return response
+
     async def stop_service(
         self,
         node_id: str,
@@ -1129,6 +1114,58 @@ class Controller:
                 request_id,
                 None,
             )
+
+    async def _handle_service_failure(
+        self,
+        node_id: str,
+        message: BaseMessage,
+    ) -> None:
+        """Handle a terminal service failure."""
+
+        payload = message.payload
+
+        if not isinstance(payload, dict):
+            return
+
+        service_id = payload.get("service_id")
+
+        if not service_id:
+            return
+
+        status = payload.get("status", "crashed")
+        reason = payload.get("error")
+        restart_attempts = payload.get(
+            "restart_attempts",
+            0,
+        )
+
+        self.failure_manager.record_failure(
+            service_id=service_id,
+            node_id=node_id,
+            status=status,
+            reason=reason,
+            restart_attempts=restart_attempts,
+        )
+
+        service = self.service_registry.get_service(
+            service_id
+        )
+
+        if service is None:
+            return
+
+        self.service_registry.update_service(
+            service_id=service_id,
+            status=status,
+        )
+
+        try:
+            await self.migrate_service(
+                service_id=service.service_id,
+                failed_node_id=node_id,
+            )
+        except Exception:
+            return
 
     async def _run_service_health_monitor(self) -> None:
         """Monitor registered services and refresh their runtime status."""
