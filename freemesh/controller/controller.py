@@ -32,6 +32,9 @@ class Controller:
         self.server: Optional[asyncio.Server] = None
         self._running = False
         self._offline_detection_task: Optional[asyncio.Task] = None
+        self._service_health_task: Optional[asyncio.Task] = None
+
+        self.service_health_interval_seconds = 2.0
 
         self._active_nodes: Dict[str, TCPTransport] = {}
 
@@ -56,6 +59,10 @@ class Controller:
             self._run_offline_detection()
         )
 
+        self._service_health_task = asyncio.create_task(
+            self._run_service_health_monitor()
+        )
+
         async with self.server:
             await self.server.serve_forever()
 
@@ -73,6 +80,16 @@ class Controller:
                 pass
 
             self._offline_detection_task = None
+
+        if self._service_health_task:
+            self._service_health_task.cancel()
+
+            try:
+                await self._service_health_task
+            except asyncio.CancelledError:
+                pass
+
+            self._service_health_task = None
 
         if self.server is not None:
             self.server.close()
@@ -695,6 +712,40 @@ class Controller:
                 request_id,
                 None,
             )
+
+    async def _run_service_health_monitor(self) -> None:
+        """Monitor registered services and refresh their runtime status."""
+
+        while self._running:
+            try:
+                await asyncio.sleep(
+                    self.service_health_interval_seconds
+                )
+
+                if not self._running:
+                    break
+
+                services = self.service_registry.list_services()
+
+                for service in services:
+                    try:
+                        await self.status_service(
+                            node_id=service.node_id,
+                            service_id=service.service_id,
+                        )
+
+                    except (
+                        RuntimeError,
+                        TimeoutError,
+                        KeyError,
+                    ):
+                        continue
+
+            except asyncio.CancelledError:
+                break
+
+            except Exception:
+                continue
 
     async def _run_offline_detection(self) -> None:
         """Run the offline node detection loop."""
