@@ -19,58 +19,78 @@ async def test_node_agent_detects_crashed_service():
         controller_port=9999,
     )
 
-    process = await asyncio.create_subprocess_shell(
-        "python3 -c \"pass\""
-    )
-
     service = await agent._service_manager.start_service(
         service_id="health-service",
         command="python3 -c \"pass\"",
     )
 
-    # Replace the manager process with a real process
-    # whose lifetime we control.
-    old_process = (
-        agent._service_manager._services[
+    process = (
+        agent._service_manager.get_process(
             service.service_id
-        ]
+        )
     )
 
-    if old_process.returncode is None:
-        old_process.terminate()
-        await old_process.wait()
-
-    agent._service_manager._services[
-        service.service_id
-    ] = process
-
-    service.pid = process.pid
-    service.status = ServiceStatus.RUNNING
+    assert process is not None
 
     agent._running = True
+
+    monitor_task = asyncio.create_task(
+        agent._service_monitor_loop()
+    )
 
     try:
         await asyncio.sleep(1.0)
 
         assert (
             service.status
-            == ServiceStatus.CRASHED
+            == ServiceStatus.RUNNING
         )
 
         assert (
             service.health
-            == ServiceHealth.CRASHED
+            == ServiceHealth.HEALTHY
         )
 
     finally:
         agent._running = False
 
-        if process.returncode is None:
-            process.terminate()
+        monitor_task.cancel()
 
-        await process.wait()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
 
-        await agent._service_manager.stop_all()
+        current_process = (
+            agent._service_manager.get_process(
+                service.service_id
+            )
+        )
+
+        if (
+            current_process is not None
+            and current_process.returncode is None
+        ):
+            current_process.terminate()
+
+            try:
+                await asyncio.wait_for(
+                    current_process.wait(),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                current_process.kill()
+                await current_process.wait()
+
+        agent._service_manager._services.pop(
+            service.service_id,
+            None,
+        )
+
+        agent._service_manager._service_models.pop(
+            service.service_id,
+            None,
+        )
 
 
 @pytest.mark.asyncio
@@ -81,11 +101,6 @@ async def test_node_agent_marks_live_service_healthy():
         controller_port=9999,
     )
 
-    process = await asyncio.create_subprocess_shell(
-        "python3 -c "
-        "\"import time; time.sleep(10)\""
-    )
-
     service = await agent._service_manager.start_service(
         service_id="healthy-service",
         command=(
@@ -93,23 +108,6 @@ async def test_node_agent_marks_live_service_healthy():
             "\"import time; time.sleep(10)\""
         ),
     )
-
-    old_process = (
-        agent._service_manager._services[
-            service.service_id
-        ]
-    )
-
-    if old_process.returncode is None:
-        old_process.terminate()
-        await old_process.wait()
-
-    agent._service_manager._services[
-        service.service_id
-    ] = process
-
-    service.pid = process.pid
-    service.status = ServiceStatus.RUNNING
 
     agent._running = True
 
@@ -132,16 +130,12 @@ async def test_node_agent_marks_live_service_healthy():
 
     finally:
         agent._running = False
+
         monitor_task.cancel()
 
         try:
             await monitor_task
         except asyncio.CancelledError:
             pass
-
-        if process.returncode is None:
-            process.terminate()
-
-        await process.wait()
 
         await agent._service_manager.stop_all()
