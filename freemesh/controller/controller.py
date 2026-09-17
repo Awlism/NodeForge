@@ -16,6 +16,9 @@ from freemesh.controller.node_registry import (
     NodeRegistry,
     NodeState,
 )
+from freemesh.controller.reconciler import (
+    Reconciler,
+)
 from freemesh.controller.resource_accounting import (
     ResourceAccounting,
 )
@@ -48,7 +51,6 @@ from freemesh.scheduler.resource_scheduler import (
     ResourceNodeCandidate,
     ResourceScheduler,
 )
-from freemesh.scheduler.scheduler import NodeCandidate
 from freemesh.security.auth import (
     Authenticator,
     AuthenticationError,
@@ -78,9 +80,15 @@ class Controller:
         self.registry = NodeRegistry()
         self.resource_registry = ResourceRegistry()
         self.service_registry = ServiceRegistry()
+
         self.service_intent_registry = (
             ServiceIntentRegistry()
         )
+
+        self.reconciler = Reconciler(
+            self.service_intent_registry
+        )
+
         self.failure_manager = FailureManager()
 
         self.failover_manager = FailoverManager()
@@ -129,6 +137,10 @@ class Controller:
             str,
             asyncio.Event,
         ] = {}
+
+    # =========================================================
+    # SERVICE INTENT
+    # =========================================================
 
     def create_service_intent(
         self,
@@ -184,6 +196,132 @@ class Controller:
         return self.service_intent_registry.remove(
             service_id
         )
+
+    # =========================================================
+    # RECONCILIATION
+    # =========================================================
+
+    async def reconcile_service(
+        self,
+        service_id: str,
+    ):
+        """Reconcile one service with its desired state."""
+
+        actual_service = (
+            self.service_registry.get_service(
+                service_id
+            )
+        )
+
+        async def start_service_for_reconcile(
+            service_id: str,
+            command: str,
+            requirements: ServiceRequirements,
+        ):
+            """Start a service using automatic placement."""
+
+            return await self.start_service_auto(
+                service_id=service_id,
+                command=command,
+                required_cpu_cores=(
+                    requirements.cpu_cores
+                ),
+                required_memory_mb=(
+                    requirements.memory_mb
+                ),
+                required_disk_gb=(
+                    requirements.disk_gb
+                ),
+            )
+
+        async def stop_service_for_reconcile(
+            service_id: str,
+        ):
+            """Stop a service on its currently assigned node."""
+
+            service = (
+                self.service_registry.get_service(
+                    service_id
+                )
+            )
+
+            if service is None:
+                return None
+
+            return await self.stop_service(
+                node_id=service.node_id,
+                service_id=service_id,
+            )
+
+        async def migrate_service_for_reconcile(
+            service_id: str,
+        ):
+            """Migrate a service away from its current node."""
+
+            service = (
+                self.service_registry.get_service(
+                    service_id
+                )
+            )
+
+            if service is None:
+                return None
+
+            return await self.migrate_service(
+                service_id=service_id,
+                failed_node_id=service.node_id,
+            )
+
+        return await self.reconciler.reconcile(
+            service_id=service_id,
+            actual_service=actual_service,
+            start_service=(
+                start_service_for_reconcile
+            ),
+            stop_service=(
+                stop_service_for_reconcile
+            ),
+            migrate_service=(
+                migrate_service_for_reconcile
+            ),
+        )
+
+    async def reconcile_all_services(self):
+        """Reconcile all registered service intents."""
+
+        results = []
+
+        for intent in (
+            self.service_intent_registry.list_all()
+        ):
+            try:
+                result = await self.reconcile_service(
+                    intent.service_id
+                )
+
+                results.append(result)
+
+            except Exception as exc:
+                from freemesh.controller.reconciler import (
+                    ReconciliationResult,
+                )
+
+                results.append(
+                    ReconciliationResult(
+                        service_id=(
+                            intent.service_id
+                        ),
+                        action="error",
+                        changed=False,
+                        reason=str(exc),
+                    )
+                )
+
+        return results
+
+    # =========================================================
+    # CONTROLLER LIFECYCLE
+    # =========================================================
 
     async def start(self) -> None:
         """Start the controller."""
@@ -267,6 +405,10 @@ class Controller:
         self.resource_registry.clear()
         self.resource_accounting.clear()
 
+    # =========================================================
+    # CONNECTION HANDLING
+    # =========================================================
+
     async def _handle_client_connection(
         self,
         reader: asyncio.StreamReader,
@@ -342,6 +484,10 @@ class Controller:
                 )
 
             await transport.disconnect()
+
+    # =========================================================
+    # REGISTRATION / AUTHENTICATION
+    # =========================================================
 
     async def _handle_registration(
         self,
@@ -601,6 +747,10 @@ class Controller:
 
             return False
 
+    # =========================================================
+    # NODE MESSAGE LOOP
+    # =========================================================
+
     async def _handle_node_message_loop(
         self,
         node_id: str,
@@ -665,6 +815,10 @@ class Controller:
 
             except Exception:
                 break
+
+    # =========================================================
+    # HEARTBEAT / RESOURCES
+    # =========================================================
 
     async def _handle_heartbeat(
         self,
@@ -862,6 +1016,10 @@ class Controller:
 
         await transport.send(response)
 
+    # =========================================================
+    # SERVICE RESPONSE / REGISTRY
+    # =========================================================
+
     def _store_service_response(
         self,
         message: BaseMessage,
@@ -984,6 +1142,10 @@ class Controller:
         if event:
             event.set()
 
+    # =========================================================
+    # RESOURCE PLACEMENT
+    # =========================================================
+
     def _build_resource_candidates(
         self,
         exclude_node_id: Optional[str] = None,
@@ -1054,6 +1216,10 @@ class Controller:
                 requirements=requirements,
             )
         )
+
+    # =========================================================
+    # SERVICE START
+    # =========================================================
 
     async def start_service_auto(
         self,
@@ -1235,6 +1401,10 @@ class Controller:
                 request_id,
                 None,
             )
+
+    # =========================================================
+    # SERVICE MIGRATION
+    # =========================================================
 
     async def migrate_service(
         self,
@@ -1421,6 +1591,10 @@ class Controller:
             },
         )
 
+    # =========================================================
+    # SERVICE STOP / STATUS
+    # =========================================================
+
     async def stop_service(
         self,
         node_id: str,
@@ -1572,6 +1746,10 @@ class Controller:
                 None,
             )
 
+    # =========================================================
+    # FAILURE / RECOVERY
+    # =========================================================
+
     async def _handle_service_failure(
         self,
         node_id: str,
@@ -1671,6 +1849,10 @@ class Controller:
 
             except Exception:
                 continue
+
+    # =========================================================
+    # BACKGROUND MONITORS
+    # =========================================================
 
     async def _run_service_health_monitor(
         self,
