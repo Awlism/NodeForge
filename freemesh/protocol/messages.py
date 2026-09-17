@@ -1,30 +1,40 @@
 """Protocol message definitions for NodeForge."""
 
+import uuid
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Dict
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 PROTOCOL_VERSION = "1.0"
 
 
 class MessageType(str, Enum):
-    """Enumeration of all message types in the protocol."""
+    """Supported NodeForge protocol message types."""
 
     REGISTER = "register"
     REGISTER_RESPONSE = "register_response"
+
     AUTHENTICATE = "authenticate"
     AUTHENTICATE_RESPONSE = "authenticate_response"
+
     HEARTBEAT = "heartbeat"
     HEARTBEAT_RESPONSE = "heartbeat_response"
 
+    RESOURCE_REPORT = "resource_report"
+    RESOURCE_REPORT_RESPONSE = "resource_report_response"
+
     SERVICE_START = "service_start"
     SERVICE_START_RESPONSE = "service_start_response"
+
     SERVICE_STOP = "service_stop"
     SERVICE_STOP_RESPONSE = "service_stop_response"
+
     SERVICE_STATUS = "service_status"
     SERVICE_STATUS_RESPONSE = "service_status_response"
+
     SERVICE_FAILURE = "service_failure"
     SERVICE_FAILURE_RESPONSE = "service_failure_response"
 
@@ -34,27 +44,14 @@ class MessageType(str, Enum):
 
 
 class BaseMessage(BaseModel):
-    """Base message model for all protocol messages."""
+    """Base protocol message exchanged between Controller and Node."""
 
-    version: str = Field(
-        default=PROTOCOL_VERSION,
-        description="Protocol version",
-    )
-    type: MessageType = Field(
-        ...,
-        description="Message type",
-    )
+    version: str = Field(default=PROTOCOL_VERSION)
+    type: MessageType
     message_id: str = Field(
-        ...,
-        description="Unique message identifier",
+        default_factory=lambda: str(uuid.uuid4())
     )
-    payload: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Message payload",
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
     )
-    timestamp: Optional[float] = Field(
-        default=None,
-        description="Message timestamp",
-    )
-
-    model_config = ConfigDict(use_enum_values=False)
