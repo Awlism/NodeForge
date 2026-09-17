@@ -3,7 +3,6 @@ import pytest
 from freemesh.controller.controller import Controller
 from freemesh.controller.service_intent import (
     DesiredState,
-    ServiceIntent,
 )
 from freemesh.service import ServiceStatus
 from freemesh.service_requirements import ServiceRequirements
@@ -26,6 +25,7 @@ async def test_controller_reconciles_missing_running_service(
     async def fake_start_service_auto(
         service_id,
         command,
+        *,
         cpu_cores=0.0,
         memory_mb=0,
         disk_gb=0.0,
@@ -172,11 +172,20 @@ async def test_controller_reconcile_all_services(
     async def fake_start_service_auto(
         service_id,
         command,
+        *,
         cpu_cores=0.0,
         memory_mb=0,
         disk_gb=0.0,
     ):
-        calls.append(service_id)
+        calls.append(
+            {
+                "service_id": service_id,
+                "command": command,
+                "cpu_cores": cpu_cores,
+                "memory_mb": memory_mb,
+                "disk_gb": disk_gb,
+            }
+        )
 
         return {
             "service_id": service_id,
@@ -202,7 +211,12 @@ async def test_controller_reconcile_all_services(
     assert result_by_id["service-4"].changed is True
     assert result_by_id["service-5"].changed is True
 
-    assert set(calls) == {
+    assert len(calls) == 2
+
+    assert {
+        call["service_id"]
+        for call in calls
+    } == {
         "service-4",
         "service-5",
     }
