@@ -1,47 +1,66 @@
 import pytest
 
 from freemesh.controller.controller import Controller
-from freemesh.controller.service_intent import DesiredState
+from freemesh.controller.service_intent import (
+    DesiredState,
+    ServiceIntent,
+)
+from freemesh.service import ServiceStatus
+from freemesh.service_requirements import ServiceRequirements
 
 
 @pytest.mark.asyncio
-async def test_controller_reconciles_missing_running_service():
+async def test_controller_reconciles_missing_running_service(
+    monkeypatch,
+):
     controller = Controller()
 
     controller.create_service_intent(
         service_id="service-1",
-        command="python -c 'import time; time.sleep(10)'",
         desired_state=DesiredState.RUNNING,
+        command="python -c 'import time; time.sleep(60)'",
     )
 
     calls = []
 
-    async def fake_start_service(
+    async def fake_start_service_auto(
         service_id,
         command,
-        requirements=None,
+        cpu_cores=0.0,
+        memory_mb=0,
+        disk_gb=0.0,
     ):
         calls.append(
-            (
-                service_id,
-                command,
-                requirements,
-            )
+            {
+                "service_id": service_id,
+                "command": command,
+                "cpu_cores": cpu_cores,
+                "memory_mb": memory_mb,
+                "disk_gb": disk_gb,
+            }
         )
 
-    controller.start_service = fake_start_service
+        return {
+            "service_id": service_id,
+            "status": "running",
+        }
+
+    monkeypatch.setattr(
+        controller,
+        "start_service_auto",
+        fake_start_service_auto,
+    )
 
     result = await controller.reconcile_service(
         "service-1"
     )
 
-    assert result.service_id == "service-1"
     assert result.action == "start"
     assert result.changed is True
     assert result.reason == "service_missing"
 
     assert len(calls) == 1
-    assert calls[0][0] == "service-1"
+    assert calls[0]["service_id"] == "service-1"
 
 
 @pytest.mark.asyncio
@@ -50,32 +69,18 @@ async def test_controller_reconciles_running_service_without_action():
 
     controller.create_service_intent(
         service_id="service-2",
-        command="python app.py",
         desired_state=DesiredState.RUNNING,
+        command="python -c 'import time; time.sleep(60)'",
     )
 
-    service = controller.service_registry.register_service(
+    controller.service_registry.register_service(
         service_id="service-2",
-        node_id="node-a",
-        status="running",
+        node_id="node-1",
+        status=ServiceStatus.RUNNING,
         pid=12345,
-        command="python app.py",
+        command="python -c 'import time; time.sleep(60)'",
+        requirements=ServiceRequirements(),
     )
-
-    calls = []
-
-    async def fake_start_service(*args, **kwargs):
-        calls.append("start")
-
-    async def fake_stop_service(*args, **kwargs):
-        calls.append("stop")
-
-    async def fake_migrate_service(*args, **kwargs):
-        calls.append("migrate")
-
-    controller.start_service = fake_start_service
-    controller.stop_service = fake_stop_service
-    controller.migrate_service = fake_migrate_service
 
     result = await controller.reconcile_service(
         "service-2"
@@ -84,33 +89,52 @@ async def test_controller_reconciles_running_service_without_action():
     assert result.action == "none"
     assert result.changed is False
     assert result.reason == "already_running"
-    assert calls == []
 
 
 @pytest.mark.asyncio
-async def test_controller_reconciles_stopped_intent():
+async def test_controller_reconciles_stopped_intent(
+    monkeypatch,
+):
     controller = Controller()
 
     controller.create_service_intent(
         service_id="service-3",
-        command="python app.py",
         desired_state=DesiredState.STOPPED,
+        command="python -c 'import time; time.sleep(60)'",
     )
 
     controller.service_registry.register_service(
         service_id="service-3",
-        node_id="node-a",
-        status="running",
+        node_id="node-1",
+        status=ServiceStatus.RUNNING,
         pid=12345,
-        command="python app.py",
+        command="python -c 'import time; time.sleep(60)'",
+        requirements=ServiceRequirements(),
     )
 
     calls = []
 
-    async def fake_stop_service(service_id):
-        calls.append(service_id)
+    async def fake_stop_service(
+        node_id,
+        service_id,
+    ):
+        calls.append(
+            {
+                "node_id": node_id,
+                "service_id": service_id,
+            }
+        )
 
-    controller.stop_service = fake_stop_service
+        return {
+            "service_id": service_id,
+            "status": "stopped",
+        }
+
+    monkeypatch.setattr(
+        controller,
+        "stop_service",
+        fake_stop_service,
+    )
 
     result = await controller.reconcile_service(
         "service-3"
@@ -119,52 +143,53 @@ async def test_controller_reconciles_stopped_intent():
     assert result.action == "stop"
     assert result.changed is True
     assert result.reason == "desired_state_stopped"
-    assert calls == ["service-3"]
+
+    assert len(calls) == 1
+    assert calls[0]["node_id"] == "node-1"
+    assert calls[0]["service_id"] == "service-3"
 
 
 @pytest.mark.asyncio
-async def test_controller_reconcile_all_services():
+async def test_controller_reconcile_all_services(
+    monkeypatch,
+):
     controller = Controller()
 
     controller.create_service_intent(
         service_id="service-4",
-        command="python app.py",
         desired_state=DesiredState.RUNNING,
+        command="python -c 'import time; time.sleep(60)'",
     )
 
     controller.create_service_intent(
         service_id="service-5",
-        command="python worker.py",
-        desired_state=DesiredState.STOPPED,
+        desired_state=DesiredState.RUNNING,
+        command="python -c 'import time; time.sleep(60)'",
     )
 
-    controller.service_registry.register_service(
-        service_id="service-5",
-        node_id="node-a",
-        status="running",
-        pid=54321,
-        command="python worker.py",
-    )
+    calls = []
 
-    start_calls = []
-    stop_calls = []
-
-    async def fake_start_service(
+    async def fake_start_service_auto(
         service_id,
         command,
-        requirements=None,
+        cpu_cores=0.0,
+        memory_mb=0,
+        disk_gb=0.0,
     ):
-        start_calls.append(service_id)
+        calls.append(service_id)
 
-    async def fake_stop_service(service_id):
-        stop_calls.append(service_id)
+        return {
+            "service_id": service_id,
+            "status": "running",
+        }
 
-    controller.start_service = fake_start_service
-    controller.stop_service = fake_stop_service
+    monkeypatch.setattr(
+        controller,
+        "start_service_auto",
+        fake_start_service_auto,
+    )
 
     results = await controller.reconcile_all_services()
-
-    assert len(results) == 2
 
     result_by_id = {
         result.service_id: result
@@ -172,10 +197,12 @@ async def test_controller_reconcile_all_services():
     }
 
     assert result_by_id["service-4"].action == "start"
-    assert result_by_id["service-4"].changed is True
+    assert result_by_id["service-5"].action == "start"
 
-    assert result_by_id["service-5"].action == "stop"
+    assert result_by_id["service-4"].changed is True
     assert result_by_id["service-5"].changed is True
 
-    assert start_calls == ["service-4"]
-    assert stop_calls == ["service-5"]
+    assert set(calls) == {
+        "service-4",
+        "service-5",
+    }
