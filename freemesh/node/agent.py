@@ -263,7 +263,7 @@ class NodeAgent:
         if self.transport is None:
             return
 
-        while self._running and self.transport.is_connected():
+        while self._running and await self.transport.is_connected():
             message = await self.transport.receive()
 
             if message is None:
@@ -295,7 +295,7 @@ class NodeAgent:
             if self.transport is None:
                 break
 
-            if not self.transport.is_connected():
+            if not await self.transport.is_connected():
                 break
 
             heartbeat_message = BaseMessage(
@@ -468,7 +468,7 @@ class NodeAgent:
 
             self._services.pop(service_id, None)
             self._service_commands.pop(service_id, None)
-            self._service_statuses[service_id] = "stopped"
+            self._service_statuses.pop(service_id, None)
             self._service_restart_attempts.pop(service_id, None)
 
             await self._send_service_response(
@@ -509,27 +509,25 @@ class NodeAgent:
         process = self._services.get(service_id)
 
         if process is None:
-            status = self._service_statuses.get(
-                service_id,
-                "not_found",
-            )
-
             await self._send_service_response(
                 MessageType.SERVICE_STATUS_RESPONSE,
                 message.message_id,
                 {
                     "service_id": service_id,
-                    "status": status,
+                    "status": "not_found",
                     "pid": None,
-                    "restart_attempts": self._service_restart_attempts.get(
-                        service_id,
-                        0,
-                    ),
+                    "restart_attempts": 0,
                 },
             )
             return
 
-        status = "running" if process.returncode is None else "stopped"
+        if process.returncode is None:
+            status = "running"
+        else:
+            status = self._service_statuses.get(
+                service_id,
+                "crashed",
+            )
 
         self._service_statuses[service_id] = status
 
