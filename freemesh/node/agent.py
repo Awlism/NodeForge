@@ -9,6 +9,7 @@ from typing import Optional
 from freemesh.node.resources import collect_node_resources
 from freemesh.protocol.messages import BaseMessage, MessageType
 from freemesh.protocol.transport import TCPTransport
+from freemesh.restart_engine import RestartEngine
 from freemesh.service import ServiceStatus
 from freemesh.service_health import ServiceHealthChecker
 from freemesh.service_manager import ServiceManager
@@ -43,8 +44,12 @@ class NodeAgent:
         self.controller_host = controller_host
         self.controller_port = controller_port
         self.authentication_token = authentication_token
-        self.reconnect_delay_seconds = reconnect_delay_seconds
-        self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.reconnect_delay_seconds = (
+            reconnect_delay_seconds
+        )
+        self.heartbeat_interval_seconds = (
+            heartbeat_interval_seconds
+        )
 
         self.state = AgentState.DISCONNECTED
         self.transport = TCPTransport()
@@ -59,6 +64,12 @@ class NodeAgent:
         )
 
         self._health_checker = ServiceHealthChecker()
+
+        self._restart_engine = RestartEngine(
+            max_restart_attempts=3,
+            backoff_seconds=0.0,
+            health_checker=self._health_checker,
+        )
 
     def _collect_resource_payload(self) -> dict:
         """Collect current resource information for this node."""
@@ -136,8 +147,10 @@ class NodeAgent:
                     self._heartbeat_loop()
                 )
 
-                self._service_monitor_task = asyncio.create_task(
-                    self._service_monitor_loop()
+                self._service_monitor_task = (
+                    asyncio.create_task(
+                        self._service_monitor_loop()
+                    )
                 )
 
                 done, pending = await asyncio.wait(
@@ -267,7 +280,10 @@ class NodeAgent:
                 "Unexpected authentication response"
             )
 
-        if auth_response.payload.get("status") != "authenticated":
+        if (
+            auth_response.payload.get("status")
+            != "authenticated"
+        ):
             raise PermissionError(
                 auth_response.payload.get(
                     "error",
@@ -287,7 +303,10 @@ class NodeAgent:
             if message.type == MessageType.HEARTBEAT_RESPONSE:
                 continue
 
-            if message.type == MessageType.RESOURCE_REPORT_RESPONSE:
+            if (
+                message.type
+                == MessageType.RESOURCE_REPORT_RESPONSE
+            ):
                 continue
 
             if message.type == MessageType.SERVICE_START:
@@ -342,10 +361,11 @@ class NodeAgent:
                 if process is None:
                     continue
 
-                # The process is alive.
+                # The process is still alive.
                 #
-                # The HealthChecker verifies the actual OS process
-                # instead of assuming that a PID means healthy.
+                # The HealthChecker verifies the actual OS
+                # process instead of assuming that a PID means
+                # healthy.
                 if process.returncode is None:
                     self._health_checker.check(service)
                     continue
@@ -353,98 +373,54 @@ class NodeAgent:
                 # The process has exited.
                 service.mark_crashed()
 
-                # Maximum restart attempts have already been reached.
-                if (
-                    service.restart_attempts
-                    >= service.max_restart_attempts
-                ):
-                    failure_message = BaseMessage(
-                        type=MessageType.SERVICE_FAILURE,
-                        message_id=str(uuid.uuid4()),
-                        payload={
-                            "service_id": service.service_id,
-                            "node_id": self.node_id,
-                            "command": service.command,
-                            "status": ServiceStatus.CRASHED.value,
-                            "restart_attempts": (
-                                service.restart_attempts
-                            ),
-                            "max_restart_attempts": (
-                                service.max_restart_attempts
-                            ),
-                            "requirements": (
-                                service.requirements.to_dict()
-                            ),
-                            "health": service.health.value,
-                            "error": (
-                                "Maximum restart attempts reached"
-                            ),
-                        },
-                    )
+                # RestartEngine handles:
+                # - restart attempts
+                # - backoff
+                # - process startup
+                # - health verification
+                # - restart exhaustion
+                restarted = await self._restart_engine.restart(
+                    service=service,
+                    service_manager=self._service_manager,
+                    node_id=self.node_id,
+                )
 
-                    try:
-                        await self.transport.send(
-                            failure_message
-                        )
-                    except Exception:
-                        pass
-
+                if restarted:
                     continue
 
-                # Try to restart the service.
+                # Restart attempts are exhausted.
+                failure_message = BaseMessage(
+                    type=MessageType.SERVICE_FAILURE,
+                    message_id=str(uuid.uuid4()),
+                    payload={
+                        "service_id": service.service_id,
+                        "node_id": self.node_id,
+                        "command": service.command,
+                        "status": (
+                            ServiceStatus.CRASHED.value
+                        ),
+                        "restart_attempts": (
+                            service.restart_attempts
+                        ),
+                        "max_restart_attempts": (
+                            service.max_restart_attempts
+                        ),
+                        "requirements": (
+                            service.requirements.to_dict()
+                        ),
+                        "health": service.health.value,
+                        "error": (
+                            "Maximum restart attempts reached"
+                        ),
+                    },
+                )
+
                 try:
-                    new_process = (
-                        await asyncio.create_subprocess_shell(
-                            service.command
-                        )
+                    await self.transport.send(
+                        failure_message
                     )
-
-                    self._service_manager._services[
-                        service.service_id
-                    ] = new_process
-
-                    service.restart_attempts += 1
-
-                    service.mark_running(
-                        pid=new_process.pid,
-                        node_id=self.node_id,
-                    )
-
-                    # Verify the new process immediately.
-                    self._health_checker.check(service)
-
-                except Exception as exc:
-                    service.restart_attempts += 1
-                    service.mark_failed()
-
-                    failure_message = BaseMessage(
-                        type=MessageType.SERVICE_FAILURE,
-                        message_id=str(uuid.uuid4()),
-                        payload={
-                            "service_id": service.service_id,
-                            "node_id": self.node_id,
-                            "command": service.command,
-                            "status": ServiceStatus.FAILED.value,
-                            "restart_attempts": (
-                                service.restart_attempts
-                            ),
-                            "max_restart_attempts": (
-                                service.max_restart_attempts
-                            ),
-                            "requirements": (
-                                service.requirements.to_dict()
-                            ),
-                            "health": service.health.value,
-                            "error": str(exc),
-                        },
-                    )
-
-                    try:
-                        await self.transport.send(
-                            failure_message
-                        )
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
 
     async def _handle_service_start(
         self,
@@ -500,9 +476,11 @@ class NodeAgent:
                 )
             )
 
-            service = await self._service_manager.start_service(
-                service_id=service_id,
-                command=command,
+            service = (
+                await self._service_manager.start_service(
+                    service_id=service_id,
+                    command=command,
+                )
             )
 
             service.requirements = requirements
@@ -575,8 +553,10 @@ class NodeAgent:
             return
 
         try:
-            service = await self._service_manager.stop_service(
-                service_id
+            service = (
+                await self._service_manager.stop_service(
+                    service_id
+                )
             )
 
             response = BaseMessage(
