@@ -26,3 +26,30 @@ class Service:
     pid: Optional[int] = None
     restart_attempts: int = 0
     max_restart_attempts: int = 3
+
+    def mark_starting(self) -> None:
+        """Mark the service as starting."""
+        self.status = ServiceStatus.STARTING
+
+    def mark_running(self, pid: int) -> None:
+        """Mark the service as running."""
+        self.status = ServiceStatus.RUNNING
+        self.pid = pid
+
+    def mark_stopping(self) -> None:
+        """Mark the service as stopping."""
+        self.status = ServiceStatus.STOPPING
+
+    def mark_stopped(self) -> None:
+        """Mark the service as stopped."""
+        self.status = ServiceStatus.STOPPED
+        self.pid = None
+
+    def mark_crashed(self) -> None:
+        """Mark the service as crashed."""
+        self.status = ServiceStatus.CRASHED
+
+    def mark_failed(self) -> None:
+        """Mark the service as failed."""
+        self.status = ServiceStatus.FAILED
+        self.pid = None
