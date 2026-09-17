@@ -30,14 +30,19 @@ async def wait_for_condition(
 
 
 @pytest.mark.asyncio
-async def test_controller_node_agent_end_to_end():
+async def test_controller_node_agent_end_to_end(
+    monkeypatch,
+):
     """Test real Controller <-> NodeAgent service lifecycle."""
 
     token = "nodeforge-e2e-token"
 
-    authenticator = DevelopmentTokenAuthenticator(
-        token=token
+    monkeypatch.setenv(
+        "NODEFORGE_AUTH_TOKEN",
+        token,
     )
+
+    authenticator = DevelopmentTokenAuthenticator()
 
     controller = Controller(
         host="127.0.0.1",
@@ -51,12 +56,11 @@ async def test_controller_node_agent_end_to_end():
     )
 
     try:
-        connected = await wait_for_condition(
+        started = await wait_for_condition(
             lambda: controller.server is not None,
         )
 
-        assert connected is True
-
+        assert started is True
         assert controller.server is not None
 
         sockets = controller.server.sockets
@@ -81,8 +85,10 @@ async def test_controller_node_agent_end_to_end():
 
         try:
             ready = await wait_for_condition(
-                lambda: node.get_state()
-                == AgentState.READY,
+                lambda: (
+                    node.get_state()
+                    == AgentState.READY
+                ),
                 timeout=5.0,
             )
 
@@ -133,17 +139,22 @@ async def test_controller_node_agent_end_to_end():
 
             service_id = "e2e-service"
 
+            command = (
+                "python3 -c "
+                "\"import time; time.sleep(30)\""
+            )
+
             start_response = (
                 await controller.start_service(
                     node_id="e2e-node",
                     service_id=service_id,
-                    command="python3 -c "
-                    "\"import time; time.sleep(30)\"",
+                    command=command,
                 )
             )
 
             assert (
-                start_response.type.value
+                start_response.type
+                .value
                 == "service_start_response"
             )
 
@@ -170,10 +181,8 @@ async def test_controller_node_agent_end_to_end():
 
             assert service is not None
             assert service.node_id == "e2e-node"
-            assert service.command == (
-                "python3 -c "
-                "\"import time; time.sleep(30)\""
-            )
+            assert service.command == command
+            assert service.pid is not None
 
             status_response = (
                 await controller.status_service(
@@ -195,6 +204,11 @@ async def test_controller_node_agent_end_to_end():
             assert (
                 status_response.payload["node_id"]
                 == "e2e-node"
+            )
+
+            assert (
+                status_response.payload["pid"]
+                == service.pid
             )
 
             stop_response = (
