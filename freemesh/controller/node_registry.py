@@ -1,6 +1,6 @@
 """Node registry for the NodeForge controller."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional
@@ -39,11 +39,14 @@ class NodeInfo:
             True if node has not sent heartbeat within timeout period, False otherwise
         """
         if self.last_heartbeat_time is None:
-            # No heartbeat received yet, check registration time
-            elapsed = (datetime.now(timezone.utc) - self.registration_time).total_seconds()
+            elapsed = (
+                datetime.now(timezone.utc) - self.registration_time
+            ).total_seconds()
             return elapsed > timeout_seconds
 
-        elapsed = (datetime.now(timezone.utc) - self.last_heartbeat_time).total_seconds()
+        elapsed = (
+            datetime.now(timezone.utc) - self.last_heartbeat_time
+        ).total_seconds()
         return elapsed > timeout_seconds
 
 
@@ -61,7 +64,10 @@ class NodeRegistry:
         connection_address: Optional[str] = None,
         connection_port: Optional[int] = None,
     ) -> NodeInfo:
-        """Register a new node in the registry.
+        """Register a new node or refresh an existing node registration.
+
+        If a node with the same node_id reconnects, its existing registry
+        entry is refreshed instead of raising an error.
 
         Args:
             node_id: Unique identifier for the node
@@ -71,17 +77,26 @@ class NodeRegistry:
 
         Returns:
             NodeInfo object for the registered node
-
-        Raises:
-            ValueError: If node_id is already registered
         """
-        if node_id in self._nodes:
-            raise ValueError(f"Node {node_id} is already registered")
+        now = datetime.now(timezone.utc)
+
+        existing_node = self._nodes.get(node_id)
+
+        if existing_node is not None:
+            existing_node.hostname = hostname
+            existing_node.registration_time = now
+            existing_node.last_heartbeat_time = None
+            existing_node.connection_address = connection_address
+            existing_node.connection_port = connection_port
+            existing_node.state = NodeState.REGISTERING
+            existing_node.authenticated = False
+
+            return existing_node
 
         node_info = NodeInfo(
             node_id=node_id,
             hostname=hostname,
-            registration_time=datetime.now(timezone.utc),
+            registration_time=now,
             connection_address=connection_address,
             connection_port=connection_port,
             state=NodeState.REGISTERING,
@@ -91,37 +106,15 @@ class NodeRegistry:
         return node_info
 
     def get_node(self, node_id: str) -> Optional[NodeInfo]:
-        """Get node information by node ID.
-
-        Args:
-            node_id: Unique identifier for the node
-
-        Returns:
-            NodeInfo if found, None otherwise
-        """
+        """Get node information by node ID."""
         return self._nodes.get(node_id)
 
     def list_nodes(self) -> List[NodeInfo]:
-        """List all registered nodes.
-
-        Returns:
-            List of all NodeInfo objects
-        """
+        """List all registered nodes."""
         return list(self._nodes.values())
 
     def update_node_state(self, node_id: str, state: NodeState) -> NodeInfo:
-        """Update the state of a node.
-
-        Args:
-            node_id: Unique identifier for the node
-            state: New NodeState for the node
-
-        Returns:
-            Updated NodeInfo object
-
-        Raises:
-            KeyError: If node is not registered
-        """
+        """Update the state of a node."""
         if node_id not in self._nodes:
             raise KeyError(f"Node {node_id} not found in registry")
 
@@ -129,26 +122,18 @@ class NodeRegistry:
         node_info.state = state
         return node_info
 
-    def authenticate_node(self, node_id: str, authenticated: bool = True) -> NodeInfo:
-        """Update authentication status of a node.
-
-        Args:
-            node_id: Unique identifier for the node
-            authenticated: Whether the node is authenticated
-
-        Returns:
-            Updated NodeInfo object
-
-        Raises:
-            KeyError: If node is not registered
-        """
+    def authenticate_node(
+        self,
+        node_id: str,
+        authenticated: bool = True,
+    ) -> NodeInfo:
+        """Update authentication status of a node."""
         if node_id not in self._nodes:
             raise KeyError(f"Node {node_id} not found in registry")
 
         node_info = self._nodes[node_id]
         node_info.authenticated = authenticated
 
-        # Update state based on authentication result
         if authenticated:
             if node_info.state == NodeState.REGISTERING:
                 node_info.state = NodeState.ONLINE
@@ -158,58 +143,33 @@ class NodeRegistry:
         return node_info
 
     def record_heartbeat(self, node_id: str) -> NodeInfo:
-        """Record a heartbeat from a node.
-
-        Args:
-            node_id: Unique identifier for the node
-
-        Returns:
-            Updated NodeInfo object
-
-        Raises:
-            KeyError: If node is not registered
-        """
+        """Record a heartbeat from a node."""
         if node_id not in self._nodes:
             raise KeyError(f"Node {node_id} not found in registry")
 
         node_info = self._nodes[node_id]
         node_info.last_heartbeat_time = datetime.now(timezone.utc)
 
-        # Update state to ONLINE if it was OFFLINE
         if node_info.state == NodeState.OFFLINE:
             node_info.state = NodeState.ONLINE
 
         return node_info
 
     def detect_offline_nodes(self, timeout_seconds: float) -> List[NodeInfo]:
-        """Detect nodes that have not sent heartbeats within the timeout period.
-
-        Args:
-            timeout_seconds: Seconds without heartbeat before considering offline
-
-        Returns:
-            List of NodeInfo objects that are considered offline
-        """
+        """Detect nodes that have not sent heartbeats within the timeout period."""
         offline_nodes = []
 
         for node_info in self._nodes.values():
-            if node_info.state != NodeState.OFFLINE and node_info.is_offline(timeout_seconds):
+            if (
+                node_info.state != NodeState.OFFLINE
+                and node_info.is_offline(timeout_seconds)
+            ):
                 offline_nodes.append(node_info)
 
         return offline_nodes
 
     def mark_offline(self, node_id: str) -> NodeInfo:
-        """Mark a node as offline.
-
-        Args:
-            node_id: Unique identifier for the node
-
-        Returns:
-            Updated NodeInfo object
-
-        Raises:
-            KeyError: If node is not registered
-        """
+        """Mark a node as offline."""
         if node_id not in self._nodes:
             raise KeyError(f"Node {node_id} not found in registry")
 
@@ -218,14 +178,7 @@ class NodeRegistry:
         return node_info
 
     def unregister_node(self, node_id: str) -> Optional[NodeInfo]:
-        """Unregister a node from the registry.
-
-        Args:
-            node_id: Unique identifier for the node
-
-        Returns:
-            NodeInfo of the unregistered node, or None if not found
-        """
+        """Unregister a node from the registry."""
         return self._nodes.pop(node_id, None)
 
     def clear(self) -> None:
@@ -233,9 +186,5 @@ class NodeRegistry:
         self._nodes.clear()
 
     def node_count(self) -> int:
-        """Get the total number of registered nodes.
-
-        Returns:
-            Count of registered nodes
-        """
+        """Get the total number of registered nodes."""
         return len(self._nodes)
