@@ -7,9 +7,15 @@ from typing import Dict, Optional
 from freemesh.controller.failure_manager import FailureManager
 from freemesh.controller.failover_manager import FailoverManager
 from freemesh.controller.node_registry import NodeRegistry, NodeState
+from freemesh.controller.resource_registry import ResourceRegistry
 from freemesh.controller.service_registry import ServiceRegistry
+from freemesh.node.resources import NodeResources
 from freemesh.protocol.messages import BaseMessage, MessageType
 from freemesh.protocol.transport import TCPTransport
+from freemesh.scheduler.resource_scheduler import (
+    ResourceNodeCandidate,
+    ResourceScheduler,
+)
 from freemesh.scheduler.scheduler import NodeCandidate
 from freemesh.security.auth import Authenticator, AuthenticationError
 
@@ -30,9 +36,11 @@ class Controller:
         self.authenticator = authenticator
 
         self.registry = NodeRegistry()
+        self.resource_registry = ResourceRegistry()
         self.service_registry = ServiceRegistry()
         self.failure_manager = FailureManager()
         self.failover_manager = FailoverManager()
+        self.resource_scheduler = ResourceScheduler()
 
         self.server: Optional[asyncio.Server] = None
         self._running = False
@@ -115,6 +123,8 @@ class Controller:
         self._service_response_events.clear()
         self._service_responses.clear()
 
+        self.resource_registry.clear()
+
     async def _handle_client_connection(
         self,
         reader: asyncio.StreamReader,
@@ -176,6 +186,10 @@ class Controller:
         finally:
             if node_id:
                 self._active_nodes.pop(node_id, None)
+
+            self.resource_registry.remove_resources(
+                node_id
+            ) if node_id else None
 
             await transport.disconnect()
 
@@ -414,6 +428,13 @@ class Controller:
                         transport,
                     )
 
+                elif message.type == MessageType.RESOURCE_REPORT:
+                    await self._handle_resource_report(
+                        node_id,
+                        message,
+                        transport,
+                    )
+
                 elif message.type in (
                     MessageType.SERVICE_START_RESPONSE,
                     MessageType.SERVICE_STOP_RESPONSE,
@@ -471,6 +492,143 @@ class Controller:
                 "node_id": node_id,
             },
         )
+
+        await transport.send(response)
+
+    async def _handle_resource_report(
+        self,
+        node_id: str,
+        message: BaseMessage,
+        transport: TCPTransport,
+    ) -> None:
+        """Handle a resource report from an authenticated node."""
+
+        payload = message.payload
+
+        if not isinstance(payload, dict):
+            response = BaseMessage(
+                type=MessageType.RESOURCE_REPORT_RESPONSE,
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "status": "failed",
+                    "node_id": node_id,
+                    "request_id": message.message_id,
+                    "error": "Invalid payload format",
+                },
+            )
+
+            await transport.send(response)
+            return
+
+        if payload.get("node_id") != node_id:
+            response = BaseMessage(
+                type=MessageType.RESOURCE_REPORT_RESPONSE,
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "status": "failed",
+                    "node_id": node_id,
+                    "request_id": message.message_id,
+                    "error": "Node ID mismatch",
+                },
+            )
+
+            await transport.send(response)
+            return
+
+        try:
+            resources = NodeResources(
+                cpu_cores=float(
+                    payload["cpu_cores"]
+                ),
+                cpu_usage_percent=float(
+                    payload["cpu_usage_percent"]
+                ),
+                memory_total_mb=int(
+                    payload["memory_total_mb"]
+                ),
+                memory_used_mb=int(
+                    payload["memory_used_mb"]
+                ),
+                disk_total_gb=float(
+                    payload["disk_total_gb"]
+                ),
+                disk_used_gb=float(
+                    payload["disk_used_gb"]
+                ),
+                running_services=int(
+                    payload.get(
+                        "running_services",
+                        0,
+                    )
+                ),
+            )
+
+            if resources.cpu_cores < 0:
+                raise ValueError("cpu_cores cannot be negative")
+
+            if not 0 <= resources.cpu_usage_percent <= 100:
+                raise ValueError(
+                    "cpu_usage_percent must be between 0 and 100"
+                )
+
+            if resources.memory_total_mb < 0:
+                raise ValueError(
+                    "memory_total_mb cannot be negative"
+                )
+
+            if resources.memory_used_mb < 0:
+                raise ValueError(
+                    "memory_used_mb cannot be negative"
+                )
+
+            if resources.disk_total_gb < 0:
+                raise ValueError(
+                    "disk_total_gb cannot be negative"
+                )
+
+            if resources.disk_used_gb < 0:
+                raise ValueError(
+                    "disk_used_gb cannot be negative"
+                )
+
+            if resources.running_services < 0:
+                raise ValueError(
+                    "running_services cannot be negative"
+                )
+
+            self.resource_registry.register_resources(
+                node_id,
+                resources,
+            )
+
+            response = BaseMessage(
+                type=MessageType.RESOURCE_REPORT_RESPONSE,
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "status": "accepted",
+                    "node_id": node_id,
+                    "request_id": message.message_id,
+                    "running_services": (
+                        resources.running_services
+                    ),
+                },
+            )
+
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            response = BaseMessage(
+                type=MessageType.RESOURCE_REPORT_RESPONSE,
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "status": "failed",
+                    "node_id": node_id,
+                    "request_id": message.message_id,
+                    "error": str(exc),
+                },
+            )
 
         await transport.send(response)
 
@@ -648,6 +806,103 @@ class Controller:
 
         except Exception:
             return
+
+    def _build_resource_candidates(
+        self,
+        exclude_node_id: Optional[str] = None,
+    ) -> list[ResourceNodeCandidate]:
+        """Build scheduler candidates from authenticated online nodes."""
+
+        candidates = []
+
+        for node in self.registry.list_nodes():
+            if node.state != NodeState.ONLINE:
+                continue
+
+            if not node.authenticated:
+                continue
+
+            if node.node_id == exclude_node_id:
+                continue
+
+            resources = self.resource_registry.get_resources(
+                node.node_id
+            )
+
+            if resources is None:
+                continue
+
+            candidates.append(
+                ResourceNodeCandidate(
+                    node_id=node.node_id,
+                    available=(
+                        node.node_id in self._active_nodes
+                    ),
+                    running_services=len(
+                        self.service_registry.list_node_services(
+                            node.node_id
+                        )
+                    ),
+                    resources=resources,
+                )
+            )
+
+        return candidates
+
+    def select_node_for_service(
+        self,
+        required_cpu_cores: float = 0.0,
+        required_memory_mb: int = 0,
+        required_disk_gb: float = 0.0,
+        exclude_node_id: Optional[str] = None,
+    ) -> Optional[ResourceNodeCandidate]:
+        """Select a node with enough resources for a service."""
+
+        candidates = self._build_resource_candidates(
+            exclude_node_id=exclude_node_id,
+        )
+
+        return self.resource_scheduler.select_node(
+            nodes=candidates,
+            required_cpu_cores=required_cpu_cores,
+            required_memory_mb=required_memory_mb,
+            required_disk_gb=required_disk_gb,
+        )
+
+    async def start_service_auto(
+        self,
+        service_id: str,
+        command: str,
+        required_cpu_cores: float = 0.0,
+        required_memory_mb: int = 0,
+        required_disk_gb: float = 0.0,
+        timeout_seconds: float = 10.0,
+    ) -> BaseMessage:
+        """Select a suitable node and start a service on it."""
+
+        if not service_id:
+            raise ValueError("service_id is required")
+
+        if not command:
+            raise ValueError("command is required")
+
+        selected_node = self.select_node_for_service(
+            required_cpu_cores=required_cpu_cores,
+            required_memory_mb=required_memory_mb,
+            required_disk_gb=required_disk_gb,
+        )
+
+        if selected_node is None:
+            raise RuntimeError(
+                "No available node has enough resources"
+            )
+
+        return await self.start_service(
+            node_id=selected_node.node_id,
+            service_id=service_id,
+            command=command,
+            timeout_seconds=timeout_seconds,
+        )
 
     async def start_service(
         self,
@@ -890,6 +1145,10 @@ class Controller:
 
                 for node_info in offline_nodes:
                     self.registry.mark_offline(
+                        node_info.node_id
+                    )
+
+                    self.resource_registry.remove_resources(
                         node_info.node_id
                     )
 
