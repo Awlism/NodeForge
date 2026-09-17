@@ -1,4 +1,4 @@
-"""Resource-aware failover and migration for NodeForge."""
+"""Resource-aware failover and service migration for NodeForge."""
 
 from dataclasses import dataclass
 from typing import Iterable, Optional
@@ -22,7 +22,7 @@ class MigrationPlan:
 
 
 class ResourceFailover:
-    """Select resource-capable replacement nodes for failed services."""
+    """Coordinate resource-aware replacement-node selection."""
 
     def __init__(
         self,
