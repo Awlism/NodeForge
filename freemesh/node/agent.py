@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 from freemesh.protocol.messages import BaseMessage, MessageType
 from freemesh.protocol.transport import TCPTransport
+from freemesh.service import Service, ServiceStatus
 
 
 class AgentState(str, Enum):
