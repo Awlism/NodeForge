@@ -397,10 +397,16 @@ class Controller:
                     MessageType.SERVICE_STOP_RESPONSE,
                     MessageType.SERVICE_STATUS_RESPONSE,
                 ):
-                    self._store_service_response(message)
+                    self._store_service_response(
+                        message,
+                        node_id=node_id,
+                    )
 
                 elif message.type == MessageType.ERROR:
-                    self._store_service_response(message)
+                    self._store_service_response(
+                        message,
+                        node_id=node_id,
+                    )
 
                 else:
                     continue
@@ -443,6 +449,7 @@ class Controller:
     def _store_service_response(
         self,
         message: BaseMessage,
+        node_id: Optional[str] = None,
     ) -> None:
         """Store a service response and update the service registry."""
 
@@ -457,19 +464,22 @@ class Controller:
 
         if service_id:
             if message.type == MessageType.SERVICE_START_RESPONSE:
-                self.service_registry.register_service(
-                    service_id=service_id,
-                    node_id=message.payload.get(
-                        "node_id",
-                        "",
-                    ),
-                    status=message.payload.get(
-                        "status",
-                        "started",
-                    ),
-                    pid=message.payload.get("pid"),
-                    command=message.payload.get("command"),
+                resolved_node_id = (
+                    node_id
+                    or message.payload.get("node_id")
                 )
+
+                if resolved_node_id:
+                    self.service_registry.register_service(
+                        service_id=service_id,
+                        node_id=resolved_node_id,
+                        status=message.payload.get(
+                            "status",
+                            "started",
+                        ),
+                        pid=message.payload.get("pid"),
+                        command=message.payload.get("command"),
+                    )
 
             elif message.type == MessageType.SERVICE_STATUS_RESPONSE:
                 existing_service = (
