@@ -665,6 +665,12 @@ class Controller:
                 f"Node {node_id} is not connected"
             )
 
+        if not service_id:
+            raise ValueError("service_id is required")
+
+        if not command:
+            raise ValueError("command is required")
+
         request_id = str(uuid.uuid4())
 
         event = asyncio.Event()
@@ -696,6 +702,15 @@ class Controller:
                     "Service start response was not received"
                 )
 
+            if response.payload.get("status") == "started":
+                self.service_registry.register_service(
+                    service_id=service_id,
+                    node_id=node_id,
+                    status="running",
+                    pid=response.payload.get("pid"),
+                    command=command,
+                )
+
             return response
 
         finally:
@@ -703,6 +718,7 @@ class Controller:
                 request_id,
                 None,
             )
+
             self._service_responses.pop(
                 request_id,
                 None,
