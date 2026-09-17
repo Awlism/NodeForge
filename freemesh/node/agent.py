@@ -376,7 +376,7 @@ class NodeAgent:
                 type=MessageType.SERVICE_START_RESPONSE,
                 message_id=str(uuid.uuid4()),
                 payload={
-                    "status": service.status.value,
+                    "status": "started",
                     "service_id": service.service_id,
                     "pid": service.pid,
                     "restart_attempts": (
