@@ -325,7 +325,7 @@ async def test_real_service_migration_e2e(
 
         assert (
             migration_record.status
-            == "completed"
+            == "migrated"
         )
 
         assert migration_record.pid == new_pid
