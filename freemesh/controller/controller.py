@@ -38,6 +38,9 @@ from freemesh.controller.service_intent_registry import (
 from freemesh.controller.service_intent_store import (
     ServiceIntentStore,
 )
+from freemesh.controller.service_metadata_store import (
+    ServiceMetadataStore,
+)
 from freemesh.controller.service_placement import (
     ServicePlacement,
 )
@@ -87,7 +90,14 @@ class Controller:
 
         self.registry = NodeRegistry()
         self.resource_registry = ResourceRegistry()
-        self.service_registry = ServiceRegistry()
+
+        self.service_metadata_store = (
+            ServiceMetadataStore(database_path)
+        )
+
+        self.service_registry = ServiceRegistry(
+            metadata_store=self.service_metadata_store,
+        )
 
         self.service_intent_store = (
             ServiceIntentStore(database_path)
@@ -347,6 +357,7 @@ class Controller:
         """Close persistent controller resources."""
 
         self.service_intent_store.close()
+        self.service_metadata_store.close()
 
     # =========================================================
     # CONTROLLER LIFECYCLE
