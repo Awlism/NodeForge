@@ -8,6 +8,9 @@ from freemesh.controller.service_intent import (
     DesiredState,
     ServiceIntent,
 )
+from freemesh.controller.service_intent_store import (
+    ServiceIntentStore,
+)
 from freemesh.service_requirements import (
     ServiceRequirements,
 )
@@ -16,8 +19,12 @@ from freemesh.service_requirements import (
 class ServiceIntentRegistry:
     """Store and manage desired state for services."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        store: ServiceIntentStore | None = None,
+    ) -> None:
         self._intents: dict[str, ServiceIntent] = {}
+        self._store = store
 
     def register(
         self,
@@ -37,6 +44,9 @@ class ServiceIntentRegistry:
             )
 
         self._intents[intent.service_id] = intent
+
+        if self._store is not None:
+            self._store.save(intent)
 
         return intent
 
@@ -82,6 +92,9 @@ class ServiceIntentRegistry:
             requirements=requirements,
         )
 
+        if self._store is not None:
+            self._store.save(intent)
+
         return intent
 
     def set_desired_state(
@@ -95,6 +108,9 @@ class ServiceIntentRegistry:
 
         intent.set_desired_state(desired_state)
 
+        if self._store is not None:
+            self._store.save(intent)
+
         return intent
 
     def remove(
@@ -104,11 +120,43 @@ class ServiceIntentRegistry:
         """Remove and return a service intent."""
 
         try:
-            return self._intents.pop(service_id)
+            intent = self._intents.pop(service_id)
         except KeyError as exc:
             raise KeyError(
                 f"Service intent not found: {service_id}"
             ) from exc
+
+        if self._store is not None:
+            self._store.delete(service_id)
+
+        return intent
+
+    def load_from_store(
+        self,
+        store: ServiceIntentStore | None = None,
+    ) -> int:
+        """Load persisted intents into the registry.
+
+        Returns the number of loaded intents.
+        """
+
+        active_store = store or self._store
+
+        if active_store is None:
+            raise ValueError(
+                "ServiceIntentStore is required"
+            )
+
+        loaded = active_store.list_all()
+
+        self._intents.clear()
+
+        for intent in loaded:
+            self._intents[intent.service_id] = intent
+
+        self._store = active_store
+
+        return len(loaded)
 
     def exists(
         self,
