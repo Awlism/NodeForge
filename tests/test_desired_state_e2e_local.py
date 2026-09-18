@@ -1,4 +1,3 @@
-cat > tests/test_desired_state_e2e.py <<'PY'
 """End-to-end test for desired-state reconciliation."""
 
 import asyncio
@@ -268,7 +267,8 @@ async def test_desired_state_reconciles_missing_service():
 
     finally:
         if node is not None:
-            await node.stop()
+            with contextlib.suppress(Exception):
+                await node.stop()
 
         if node_task is not None:
             node_task.cancel()
@@ -278,12 +278,17 @@ async def test_desired_state_reconciles_missing_service():
             ):
                 await node_task
 
-        await controller.stop()
-
         controller_task.cancel()
 
         with contextlib.suppress(
             asyncio.CancelledError
         ):
             await controller_task
-PY
+
+        with contextlib.suppress(Exception):
+            await controller.stop()
+
+        os.environ.pop(
+            "NODEFORGE_AUTH_TOKEN",
+            None,
+        )
