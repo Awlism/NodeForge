@@ -69,6 +69,7 @@ class Controller:
         port: int = 9999,
         heartbeat_timeout_seconds: float = 30.0,
         authenticator: Optional[Authenticator] = None,
+        reconciliation_interval_seconds: float = 5.0,
     ):
         self.host = host
         self.port = port
@@ -76,6 +77,9 @@ class Controller:
             heartbeat_timeout_seconds
         )
         self.authenticator = authenticator
+        self.reconciliation_interval_seconds = (
+            reconciliation_interval_seconds
+        )
 
         self.registry = NodeRegistry()
         self.resource_registry = ResourceRegistry()
@@ -118,6 +122,10 @@ class Controller:
         ] = None
 
         self._service_health_task: Optional[
+            asyncio.Task
+        ] = None
+
+        self._reconciliation_task: Optional[
             asyncio.Task
         ] = None
 
@@ -351,6 +359,12 @@ class Controller:
             )
         )
 
+        self._reconciliation_task = (
+            asyncio.create_task(
+                self._run_background_reconciliation()
+            )
+        )
+
         async with self.server:
             await self.server.serve_forever()
 
@@ -378,6 +392,16 @@ class Controller:
                 pass
 
             self._service_health_task = None
+
+        if self._reconciliation_task:
+            self._reconciliation_task.cancel()
+
+            try:
+                await self._reconciliation_task
+            except asyncio.CancelledError:
+                pass
+
+            self._reconciliation_task = None
 
         if self.server is not None:
             self.server.close()
@@ -1853,6 +1877,28 @@ class Controller:
     # =========================================================
     # BACKGROUND MONITORS
     # =========================================================
+
+    async def _run_background_reconciliation(
+        self,
+    ) -> None:
+        """Continuously reconcile desired and actual service state."""
+
+        while self._running:
+            try:
+                await asyncio.sleep(
+                    self.reconciliation_interval_seconds
+                )
+
+                if not self._running:
+                    break
+
+                await self.reconcile_all_services()
+
+            except asyncio.CancelledError:
+                break
+
+            except Exception:
+                continue
 
     async def _run_service_health_monitor(
         self,
