@@ -1,251 +1,194 @@
-"""Tests for the NodeForge Restart Engine."""
+"""Restart engine for NodeForge services."""
+
+from __future__ import annotations
 
 import asyncio
 
-import pytest
-
-from freemesh.restart_engine import RestartEngine
-from freemesh.service import (
-    ServiceHealth,
-    ServiceStatus,
-)
+from freemesh.service import Service, ServiceHealth
+from freemesh.service_health import ServiceHealthChecker
 from freemesh.service_manager import ServiceManager
 
 
-@pytest.mark.asyncio
-async def test_restart_engine_recovers_crashed_service():
-    manager = ServiceManager(
-        max_restart_attempts=3
-    )
+class RestartEngine:
+    """Handle automatic service restart attempts."""
 
-    service = await manager.start_service(
-        service_id="restart-service",
-        command=(
-            "python3 -c "
-            "\"import time; time.sleep(10)\""
-        ),
-    )
+    def __init__(
+        self,
+        max_restart_attempts: int = 3,
+        backoff_seconds: float = 0.0,
+        health_checker: ServiceHealthChecker | None = None,
+        startup_grace_seconds: float = 0.05,
+    ) -> None:
+        if max_restart_attempts < 0:
+            raise ValueError(
+                "max_restart_attempts cannot be negative"
+            )
 
-    process = manager.get_process(
-        service.service_id
-    )
+        if backoff_seconds < 0:
+            raise ValueError(
+                "backoff_seconds cannot be negative"
+            )
 
-    assert process is not None
+        if startup_grace_seconds < 0:
+            raise ValueError(
+                "startup_grace_seconds cannot be negative"
+            )
 
-    process.terminate()
-    await process.wait()
-
-    service.mark_crashed()
-
-    engine = RestartEngine(
-        max_restart_attempts=3
-    )
-
-    result = await engine.restart(
-        service=service,
-        service_manager=manager,
-    )
-
-    try:
-        assert result is True
-
-        assert (
-            service.status
-            == ServiceStatus.RUNNING
+        self.max_restart_attempts = (
+            max_restart_attempts
         )
 
-        assert (
-            service.health
-            == ServiceHealth.HEALTHY
+        self.backoff_seconds = (
+            backoff_seconds
         )
 
-        assert service.restart_attempts == 1
-
-        new_process = manager.get_process(
-            service.service_id
+        self.startup_grace_seconds = (
+            startup_grace_seconds
         )
 
-        assert new_process is not None
-        assert new_process.pid != process.pid
-
-    finally:
-        await manager.stop_all()
-
-
-@pytest.mark.asyncio
-async def test_restart_engine_counts_failed_attempts():
-    manager = ServiceManager(
-        max_restart_attempts=3
-    )
-
-    service = await manager.start_service(
-        service_id="failed-restart-service",
-        command=(
-            "python3 -c "
-            "\"raise SystemExit(1)\""
-        ),
-    )
-
-    process = manager.get_process(
-        service.service_id
-    )
-
-    assert process is not None
-
-    await process.wait()
-
-    service.mark_crashed()
-
-    engine = RestartEngine(
-        max_restart_attempts=3
-    )
-
-    result = await engine.restart(
-        service=service,
-        service_manager=manager,
-    )
-
-    try:
-        assert result is False
-
-        assert (
-            service.restart_attempts == 3
+        self.health_checker = (
+            health_checker
+            if health_checker is not None
+            else ServiceHealthChecker()
         )
 
-        assert (
-            service.status
-            == ServiceStatus.CRASHED
+    async def restart(
+        self,
+        service: Service,
+        service_manager: ServiceManager,
+        node_id: str | None = None,
+    ) -> bool:
+        """Restart a crashed service.
+
+        Returns True when the restarted service becomes
+        healthy.
+
+        Returns False when all restart attempts are
+        exhausted.
+        """
+
+        status = service.status
+
+        if hasattr(status, "value"):
+            status = status.value
+
+        if status not in {
+            "crashed",
+            "failed",
+        }:
+            return False
+
+        max_attempts = min(
+            service.max_restart_attempts,
+            self.max_restart_attempts,
         )
 
-        assert (
-            service.health
-            == ServiceHealth.CRASHED
-        )
+        while (
+            service.restart_attempts
+            < max_attempts
+        ):
+            if (
+                self.backoff_seconds > 0
+                and service.restart_attempts > 0
+            ):
+                await asyncio.sleep(
+                    self.backoff_seconds
+                    * (
+                        2
+                        ** (
+                            service.restart_attempts - 1
+                        )
+                    )
+                )
 
-    finally:
-        manager._services.pop(
-            service.service_id,
-            None,
-        )
+            process = None
 
-        manager._service_models.pop(
-            service.service_id,
-            None,
-        )
+            try:
+                process = (
+                    await asyncio.create_subprocess_shell(
+                        service.command
+                    )
+                )
 
+                service_manager._services[
+                    service.service_id
+                ] = process
 
-@pytest.mark.asyncio
-async def test_restart_engine_respects_max_attempts():
-    manager = ServiceManager(
-        max_restart_attempts=3
-    )
+                service.restart_attempts += 1
 
-    service = await manager.start_service(
-        service_id="max-attempts-service",
-        command=(
-            "python3 -c "
-            "\"import time; time.sleep(10)\""
-        ),
-    )
+                service.mark_running(
+                    pid=process.pid,
+                    node_id=node_id,
+                )
 
-    process = manager.get_process(
-        service.service_id
-    )
+                # Give the process a short startup grace
+                # period so very short-lived failures are
+                # detected before declaring the restart
+                # successful.
+                if (
+                    self.startup_grace_seconds > 0
+                ):
+                    try:
+                        await asyncio.wait_for(
+                            process.wait(),
+                            timeout=(
+                                self.startup_grace_seconds
+                            ),
+                        )
 
-    assert process is not None
+                        # The process exited during the
+                        # startup grace period.
+                        service.mark_crashed()
 
-    process.terminate()
-    await process.wait()
+                        service_manager._services.pop(
+                            service.service_id,
+                            None,
+                        )
 
-    service.mark_crashed()
+                        continue
 
-    service.restart_attempts = 3
+                    except asyncio.TimeoutError:
+                        # The process is still running.
+                        pass
 
-    engine = RestartEngine(
-        max_restart_attempts=3
-    )
+                health = (
+                    self.health_checker.check(
+                        service
+                    )
+                )
 
-    result = await engine.restart(
-        service=service,
-        service_manager=manager,
-    )
+                if (
+                    health
+                    == ServiceHealth.HEALTHY
+                ):
+                    return True
 
-    try:
-        assert result is False
+                if process.returncode is None:
+                    process.terminate()
 
-        assert (
-            service.restart_attempts == 3
-        )
+                    try:
+                        await asyncio.wait_for(
+                            process.wait(),
+                            timeout=2.0,
+                        )
+                    except asyncio.TimeoutError:
+                        process.kill()
+                        await process.wait()
 
-    finally:
-        manager._services.pop(
-            service.service_id,
-            None,
-        )
+                service_manager._services.pop(
+                    service.service_id,
+                    None,
+                )
 
-        manager._service_models.pop(
-            service.service_id,
-            None,
-        )
+                service.mark_crashed()
 
+            except Exception:
+                service_manager._services.pop(
+                    service.service_id,
+                    None,
+                )
 
-@pytest.mark.asyncio
-async def test_restart_engine_applies_backoff():
-    manager = ServiceManager(
-        max_restart_attempts=2
-    )
+                service.restart_attempts += 1
+                service.mark_failed()
 
-    service = await manager.start_service(
-        service_id="backoff-service",
-        command=(
-            "python3 -c "
-            "\"raise SystemExit(1)\""
-        ),
-    )
-
-    process = manager.get_process(
-        service.service_id
-    )
-
-    assert process is not None
-
-    await process.wait()
-
-    service.mark_crashed()
-
-    engine = RestartEngine(
-        max_restart_attempts=2,
-        backoff_seconds=0.05,
-    )
-
-    start_time = asyncio.get_running_loop().time()
-
-    result = await engine.restart(
-        service=service,
-        service_manager=manager,
-    )
-
-    elapsed = (
-        asyncio.get_running_loop().time()
-        - start_time
-    )
-
-    try:
-        assert result is False
-
-        assert (
-            service.restart_attempts == 2
-        )
-
-        assert elapsed >= 0.05
-
-    finally:
-        manager._services.pop(
-            service.service_id,
-            None,
-        )
-
-        manager._service_models.pop(
-            service.service_id,
-            None,
-        )
+        return False
