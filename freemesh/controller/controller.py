@@ -1087,9 +1087,14 @@ class Controller:
         message: BaseMessage,
         node_id: Optional[str] = None,
     ) -> None:
-        """Store response and update service state."""
+        """Store response and synchronize service state."""
 
-        request_id = message.payload.get(
+        payload = message.payload
+
+        if not isinstance(payload, dict):
+            return
+
+        request_id = payload.get(
             "request_id"
         )
 
@@ -1100,7 +1105,7 @@ class Controller:
             request_id
         ] = message
 
-        service_id = message.payload.get(
+        service_id = payload.get(
             "service_id"
         )
 
@@ -1111,14 +1116,12 @@ class Controller:
             ):
                 resolved_node_id = (
                     node_id
-                    or message.payload.get(
-                        "node_id"
-                    )
+                    or payload.get("node_id")
                 )
 
                 if resolved_node_id:
                     requirements_payload = (
-                        message.payload.get(
+                        payload.get(
                             "requirements",
                             {},
                         )
@@ -1139,14 +1142,14 @@ class Controller:
                     self.service_registry.register_service(
                         service_id=service_id,
                         node_id=resolved_node_id,
-                        status=message.payload.get(
+                        status=payload.get(
                             "status",
                             "started",
                         ),
-                        pid=message.payload.get(
+                        pid=payload.get(
                             "pid"
                         ),
-                        command=message.payload.get(
+                        command=payload.get(
                             "command"
                         ),
                         requirements=requirements,
@@ -1163,16 +1166,60 @@ class Controller:
                 )
 
                 if existing_service is not None:
+                    runtime_status = payload.get(
+                        "status",
+                        existing_service.status,
+                    )
+
+                    # A missing process on the node is a
+                    # recoverable stopped state from the
+                    # controller's reconciliation perspective.
+                    if runtime_status == "not_found":
+                        runtime_status = "stopped"
+
+                    update_kwargs = {
+                        "service_id": service_id,
+                        "status": runtime_status,
+                    }
+
+                    if payload.get("node_id"):
+                        update_kwargs["node_id"] = (
+                            payload["node_id"]
+                        )
+
+                    if payload.get("command"):
+                        update_kwargs["command"] = (
+                            payload["command"]
+                        )
+
+                    if payload.get(
+                        "requirements"
+                    ) is not None:
+                        try:
+                            update_kwargs[
+                                "requirements"
+                            ] = (
+                                ServiceRequirements.from_dict(
+                                    payload[
+                                        "requirements"
+                                    ]
+                                )
+                            )
+                        except (
+                            TypeError,
+                            ValueError,
+                        ):
+                            pass
+
+                    if runtime_status == "stopped":
+                        update_kwargs["pid"] = None
+                    elif payload.get("pid") is not None:
+                        update_kwargs["pid"] = (
+                            payload["pid"]
+                        )
+
                     self.service_registry.update_service(
-                        service_id=service_id,
-                        status=message.payload.get(
-                            "status",
-                            existing_service.status,
-                        ),
-                        pid=message.payload.get(
-                            "pid",
-                            existing_service.pid,
-                        ),
+                        **update_kwargs
                     )
 
             elif (
@@ -1188,7 +1235,7 @@ class Controller:
                 if existing_service is not None:
                     self.service_registry.update_service(
                         service_id=service_id,
-                        status=message.payload.get(
+                        status=payload.get(
                             "status",
                             "stopped",
                         ),
@@ -1748,7 +1795,7 @@ class Controller:
         service_id: str,
         timeout_seconds: float = 10.0,
     ) -> BaseMessage:
-        """Request the current service status."""
+        """Request and synchronize the current runtime service status."""
 
         transport = self._active_nodes.get(
             node_id
@@ -1794,6 +1841,70 @@ class Controller:
                 raise RuntimeError(
                     "Service status response was not received"
                 )
+
+            payload = response.payload
+
+            if isinstance(payload, dict):
+                status = payload.get(
+                    "status"
+                )
+
+                service = (
+                    self.service_registry.get_service(
+                        service_id
+                    )
+                )
+
+                if service is not None and status:
+                    runtime_status = status
+
+                    if runtime_status == "not_found":
+                        runtime_status = "stopped"
+
+                    update_kwargs = {
+                        "service_id": service_id,
+                        "status": runtime_status,
+                    }
+
+                    if payload.get("node_id"):
+                        update_kwargs["node_id"] = (
+                            payload["node_id"]
+                        )
+
+                    if payload.get("command"):
+                        update_kwargs["command"] = (
+                            payload["command"]
+                        )
+
+                    if payload.get(
+                        "requirements"
+                    ) is not None:
+                        try:
+                            update_kwargs[
+                                "requirements"
+                            ] = (
+                                ServiceRequirements.from_dict(
+                                    payload[
+                                        "requirements"
+                                    ]
+                                )
+                            )
+                        except (
+                            TypeError,
+                            ValueError,
+                        ):
+                            pass
+
+                    if runtime_status == "stopped":
+                        update_kwargs["pid"] = None
+                    elif payload.get("pid") is not None:
+                        update_kwargs["pid"] = (
+                            payload["pid"]
+                        )
+
+                    self.service_registry.update_service(
+                        **update_kwargs
+                    )
 
             return response
 
