@@ -35,6 +35,9 @@ from freemesh.controller.service_intent import (
 from freemesh.controller.service_intent_registry import (
     ServiceIntentRegistry,
 )
+from freemesh.controller.service_intent_store import (
+    ServiceIntentStore,
+)
 from freemesh.controller.service_placement import (
     ServicePlacement,
 )
@@ -70,6 +73,7 @@ class Controller:
         heartbeat_timeout_seconds: float = 30.0,
         authenticator: Optional[Authenticator] = None,
         reconciliation_interval_seconds: float = 5.0,
+        database_path: str = ":memory:",
     ):
         self.host = host
         self.port = port
@@ -85,9 +89,17 @@ class Controller:
         self.resource_registry = ResourceRegistry()
         self.service_registry = ServiceRegistry()
 
-        self.service_intent_registry = (
-            ServiceIntentRegistry()
+        self.service_intent_store = (
+            ServiceIntentStore(database_path)
         )
+
+        self.service_intent_registry = (
+            ServiceIntentRegistry(
+                store=self.service_intent_store,
+            )
+        )
+
+        self.service_intent_registry.load_from_store()
 
         self.reconciler = Reconciler(
             self.service_intent_registry
@@ -326,6 +338,15 @@ class Controller:
                 )
 
         return results
+
+    # =========================================================
+    # CONTROLLER PERSISTENCE
+    # =========================================================
+
+    def close(self) -> None:
+        """Close persistent controller resources."""
+
+        self.service_intent_store.close()
 
     # =========================================================
     # CONTROLLER LIFECYCLE
