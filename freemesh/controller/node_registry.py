@@ -55,13 +55,7 @@ class NodeRegistry:
         self,
         database_path: str = ":memory:",
     ) -> None:
-        """Initialize the node registry.
-
-        Args:
-            database_path:
-                SQLite database path.
-                Defaults to ':memory:' for backward compatibility.
-        """
+        """Initialize the node registry."""
 
         self._nodes: Dict[str, NodeInfo] = {}
 
@@ -77,7 +71,7 @@ class NodeRegistry:
         self._load_from_store()
 
     def _create_tables(self) -> None:
-        """Create the persistent node table if it does not exist."""
+        """Create the persistent node table."""
 
         self._connection.execute(
             """
@@ -125,11 +119,37 @@ class NodeRegistry:
 
         return parsed
 
+    @staticmethod
+    def _state_to_string(
+        state: NodeState | str,
+    ) -> str:
+        """Normalize NodeState or string into a database value."""
+
+        if isinstance(state, NodeState):
+            return state.value
+
+        return str(state)
+
+    @staticmethod
+    def _normalize_state(
+        state: NodeState | str,
+    ) -> NodeState:
+        """Normalize a state value into NodeState."""
+
+        if isinstance(state, NodeState):
+            return state
+
+        return NodeState(str(state))
+
     def _persist_node(
         self,
         node_info: NodeInfo,
     ) -> None:
         """Persist one node."""
+
+        state_value = self._state_to_string(
+            node_info.state
+        )
 
         self._connection.execute(
             """
@@ -162,7 +182,7 @@ class NodeRegistry:
                 self._datetime_to_string(
                     node_info.last_heartbeat_time
                 ),
-                node_info.state.value,
+                state_value,
                 node_info.connection_address,
                 node_info.connection_port,
                 int(node_info.authenticated),
@@ -199,7 +219,9 @@ class NodeRegistry:
                 last_heartbeat_time=self._string_to_datetime(
                     row["last_heartbeat_time"]
                 ),
-                state=NodeState(row["state"]),
+                state=self._normalize_state(
+                    row["state"]
+                ),
                 connection_address=row[
                     "connection_address"
                 ],
@@ -274,9 +296,13 @@ class NodeRegistry:
     def update_node_state(
         self,
         node_id: str,
-        state: NodeState,
+        state: NodeState | str,
     ) -> NodeInfo:
-        """Update the state of a node."""
+        """Update the state of a node.
+
+        Both NodeState values and their string values are accepted
+        for backward compatibility.
+        """
 
         if node_id not in self._nodes:
             raise KeyError(
@@ -284,7 +310,10 @@ class NodeRegistry:
             )
 
         node_info = self._nodes[node_id]
-        node_info.state = state
+
+        node_info.state = self._normalize_state(
+            state
+        )
 
         self._persist_node(node_info)
 
