@@ -88,8 +88,13 @@ class Controller:
             reconciliation_interval_seconds
         )
 
-        self.registry = NodeRegistry()
-        self.resource_registry = ResourceRegistry()
+        self.registry = NodeRegistry(
+            database_path=database_path,
+        )
+
+        self.resource_registry = ResourceRegistry(
+            database_path=database_path,
+        )
 
         self.service_metadata_store = (
             ServiceMetadataStore(database_path)
@@ -358,6 +363,8 @@ class Controller:
 
         self.service_intent_store.close()
         self.service_metadata_store.close()
+        self.resource_registry.close()
+        self.registry.close()
 
     # =========================================================
     # CONTROLLER LIFECYCLE
@@ -458,7 +465,6 @@ class Controller:
         self._service_response_events.clear()
         self._service_responses.clear()
 
-        self.resource_registry.clear()
         self.resource_accounting.clear()
 
     # =========================================================
