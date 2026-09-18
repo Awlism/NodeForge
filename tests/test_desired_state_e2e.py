@@ -17,6 +17,8 @@ async def wait_until(
     timeout: float = 15.0,
     interval: float = 0.1,
 ) -> None:
+    """Wait until a synchronous condition becomes true."""
+
     deadline = asyncio.get_running_loop().time() + timeout
 
     while asyncio.get_running_loop().time() < deadline:
@@ -32,6 +34,8 @@ async def wait_until(
 
 @pytest.mark.asyncio
 async def test_desired_state_reconciles_missing_service():
+    """RUNNING desired state should start a missing service."""
+
     token = "nodeforge-desired-state-token"
     os.environ["NODEFORGE_AUTH_TOKEN"] = token
 
@@ -48,6 +52,10 @@ async def test_desired_state_reconciles_missing_service():
     node_task = None
 
     try:
+        # -------------------------------------------------
+        # Controller
+        # -------------------------------------------------
+
         await wait_until(
             lambda: (
                 controller.server is not None
@@ -61,6 +69,10 @@ async def test_desired_state_reconciles_missing_service():
             .getsockname()[1]
         )
 
+        # -------------------------------------------------
+        # Node
+        # -------------------------------------------------
+
         node = NodeAgent(
             node_id="desired-state-node",
             controller_host="127.0.0.1",
@@ -71,6 +83,10 @@ async def test_desired_state_reconciles_missing_service():
         )
 
         node_task = asyncio.create_task(node.start())
+
+        # -------------------------------------------------
+        # Wait for Node connection
+        # -------------------------------------------------
 
         await wait_until(
             lambda: node.get_state() == AgentState.READY,
@@ -97,6 +113,10 @@ async def test_desired_state_reconciles_missing_service():
             timeout=5.0,
         )
 
+        # -------------------------------------------------
+        # Create Desired State
+        # -------------------------------------------------
+
         service_id = "desired-state-service"
         command = "python -c \"import time; time.sleep(30)\""
 
@@ -112,6 +132,10 @@ async def test_desired_state_reconciles_missing_service():
         assert intent.desired_state == DesiredState.RUNNING
         assert intent.command == command
 
+        # -------------------------------------------------
+        # Verify service does not exist yet
+        # -------------------------------------------------
+
         assert (
             controller.service_registry.get_service(service_id)
             is None
@@ -122,11 +146,19 @@ async def test_desired_state_reconciles_missing_service():
             is None
         )
 
+        # -------------------------------------------------
+        # Reconcile Desired → Actual
+        # -------------------------------------------------
+
         result = await controller.reconcile_service(service_id)
 
         assert result.action == "start"
         assert result.changed is True
         assert result.reason == "service_missing"
+
+        # -------------------------------------------------
+        # Wait for Controller service registration
+        # -------------------------------------------------
 
         await wait_until(
             lambda: (
@@ -142,14 +174,16 @@ async def test_desired_state_reconciles_missing_service():
 
         assert service is not None
         assert service.node_id == "desired-state-node"
-        assert service.status.value == "running"
+        assert service.status == "running"
         assert service.pid is not None
+
+        # -------------------------------------------------
+        # Verify actual NodeAgent service
+        # -------------------------------------------------
 
         await wait_until(
             lambda: (
-                node._service_manager.get_service(
-                    service_id
-                )
+                node._service_manager.get_service(service_id)
                 is not None
             ),
             timeout=10.0,
@@ -160,9 +194,18 @@ async def test_desired_state_reconciles_missing_service():
 
         assert node_service is not None
         assert node_process is not None
-        assert node_service.status.value == "running"
+        assert node_service.status == "running"
+        assert node_service.pid is not None
         assert node_service.pid == service.pid
-        assert node_process.returncode is None
+
+        # -------------------------------------------------
+        # Verify actual OS process
+        # -------------------------------------------------
+
+        process = node._service_manager.get_process(service_id)
+
+        assert process is not None
+        assert process.returncode is None
 
     finally:
         if node is not None:
@@ -183,4 +226,7 @@ async def test_desired_state_reconciles_missing_service():
         with contextlib.suppress(Exception):
             await controller.stop()
 
-        os.environ.pop("NODEFORGE_AUTH_TOKEN", None)
+        os.environ.pop(
+            "NODEFORGE_AUTH_TOKEN",
+            None,
+        )
