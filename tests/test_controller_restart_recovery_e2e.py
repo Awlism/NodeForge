@@ -173,8 +173,6 @@ async def test_real_controller_restart_recovers_nodes_service_and_intent(
             disk_gb=0.0,
         )
 
-        # Persist the desired state before starting
-        # the actual service.
         intent = (
             controller_one.create_service_intent(
                 service_id=service_id,
@@ -267,7 +265,15 @@ async def test_real_controller_restart_recovers_nodes_service_and_intent(
 
         await controller_one.stop()
 
-        await controller_one_task
+        # Controller.stop() closes the server, but the
+        # serve_forever() task itself is cancelled here.
+        if not controller_one_task.done():
+            controller_one_task.cancel()
+
+        try:
+            await controller_one_task
+        except asyncio.CancelledError:
+            pass
 
         controller_one.close()
 
@@ -498,6 +504,7 @@ async def test_real_controller_restart_recovers_nodes_service_and_intent(
                     pass
 
             controller_two.close()
+
         else:
             if not controller_one_task.done():
                 controller_one_task.cancel()
