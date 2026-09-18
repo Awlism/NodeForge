@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from freemesh.controller.service_metadata_store import (
+    ServiceMetadataStore,
+)
 from freemesh.service_requirements import ServiceRequirements
 
 
@@ -25,10 +28,19 @@ class ServiceInfo:
 
 
 class ServiceRegistry:
-    """In-memory registry for services running on NodeForge nodes."""
+    """Registry for services running on NodeForge nodes."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        metadata_store: Optional[
+            ServiceMetadataStore
+        ] = None,
+    ) -> None:
         self._services: Dict[str, ServiceInfo] = {}
+        self._metadata_store = metadata_store
+
+        if self._metadata_store is not None:
+            self.load_from_store()
 
     def register_service(
         self,
@@ -71,6 +83,7 @@ class ServiceRegistry:
         )
 
         self._services[service_id] = service
+        self._persist(service)
 
         return service
 
@@ -142,6 +155,8 @@ class ServiceRegistry:
 
         service.updated_at = datetime.now(timezone.utc)
 
+        self._persist(service)
+
         return service
 
     def move_service(
@@ -169,10 +184,15 @@ class ServiceRegistry:
     ) -> Optional[ServiceInfo]:
         """Remove a service from the registry."""
 
-        return self._services.pop(
+        service = self._services.pop(
             service_id,
             None,
         )
+
+        if service is not None and self._metadata_store is not None:
+            self._metadata_store.delete(service_id)
+
+        return service
 
     def remove_node_services(
         self,
@@ -190,6 +210,11 @@ class ServiceRegistry:
                     self._services.pop(service_id)
                 )
 
+                if self._metadata_store is not None:
+                    self._metadata_store.delete(
+                        service_id
+                    )
+
         return removed
 
     def service_count(self) -> int:
@@ -201,3 +226,47 @@ class ServiceRegistry:
         """Clear all registered services."""
 
         self._services.clear()
+
+    def load_from_store(self) -> None:
+        """Load persisted services into the registry."""
+
+        if self._metadata_store is None:
+            return
+
+        self._services.clear()
+
+        for metadata in self._metadata_store.list_all():
+            service = ServiceInfo(
+                service_id=metadata["service_id"],
+                node_id=metadata["node_id"],
+                status=metadata["status"],
+                pid=metadata["pid"],
+                command=metadata["command"],
+                requirements=metadata["requirements"],
+                updated_at=metadata["updated_at"],
+            )
+
+            self._services[
+                service.service_id
+            ] = service
+
+    def _persist(
+        self,
+        service: ServiceInfo,
+    ) -> None:
+        """Persist a service when a metadata store is configured."""
+
+        if self._metadata_store is None:
+            return
+
+        self._metadata_store.save(
+            service_id=service.service_id,
+            node_id=service.node_id,
+            pid=service.pid,
+            status=service.status,
+            health="unknown",
+            command=service.command,
+            requirements=service.requirements,
+            restart_attempts=0,
+            updated_at=service.updated_at,
+        )
