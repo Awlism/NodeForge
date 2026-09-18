@@ -46,7 +46,9 @@ async def test_desired_state_reconciles_missing_service():
         authenticator=DevelopmentTokenAuthenticator(),
     )
 
-    controller_task = asyncio.create_task(controller.start())
+    controller_task = asyncio.create_task(
+        controller.start()
+    )
 
     node = None
     node_task = None
@@ -82,14 +84,19 @@ async def test_desired_state_reconciles_missing_service():
             heartbeat_interval_seconds=0.2,
         )
 
-        node_task = asyncio.create_task(node.start())
+        node_task = asyncio.create_task(
+            node.start()
+        )
 
         # -------------------------------------------------
         # Wait for Node connection
         # -------------------------------------------------
 
         await wait_until(
-            lambda: node.get_state() == AgentState.READY,
+            lambda: (
+                node.get_state()
+                == AgentState.READY
+            ),
             timeout=10.0,
         )
 
@@ -118,7 +125,11 @@ async def test_desired_state_reconciles_missing_service():
         # -------------------------------------------------
 
         service_id = "desired-state-service"
-        command = "python -c \"import time; time.sleep(30)\""
+
+        command = (
+            "python -c "
+            "\"import time; time.sleep(30)\""
+        )
 
         controller.create_service_intent(
             service_id=service_id,
@@ -126,10 +137,15 @@ async def test_desired_state_reconciles_missing_service():
             command=command,
         )
 
-        intent = controller.get_service_intent(service_id)
+        intent = controller.get_service_intent(
+            service_id
+        )
 
         assert intent is not None
-        assert intent.desired_state == DesiredState.RUNNING
+        assert (
+            intent.desired_state
+            == DesiredState.RUNNING
+        )
         assert intent.command == command
 
         # -------------------------------------------------
@@ -137,12 +153,16 @@ async def test_desired_state_reconciles_missing_service():
         # -------------------------------------------------
 
         assert (
-            controller.service_registry.get_service(service_id)
+            controller.service_registry.get_service(
+                service_id
+            )
             is None
         )
 
         assert (
-            node._service_manager.get_service(service_id)
+            node._service_manager.get_service(
+                service_id
+            )
             is None
         )
 
@@ -150,7 +170,9 @@ async def test_desired_state_reconciles_missing_service():
         # Reconcile Desired → Actual
         # -------------------------------------------------
 
-        result = await controller.reconcile_service(service_id)
+        result = await controller.reconcile_service(
+            service_id
+        )
 
         assert result.action == "start"
         assert result.changed is True
@@ -170,11 +192,23 @@ async def test_desired_state_reconciles_missing_service():
             timeout=10.0,
         )
 
-        service = controller.service_registry.get_service(service_id)
+        service = (
+            controller.service_registry.get_service(
+                service_id
+            )
+        )
 
         assert service is not None
-        assert service.node_id == "desired-state-node"
+        assert (
+            service.node_id
+            == "desired-state-node"
+        )
+
+        # IMPORTANT:
+        # ServiceRegistry currently stores status
+        # as a string, not as ServiceStatus enum.
         assert service.status == "running"
+
         assert service.pid is not None
 
         # -------------------------------------------------
@@ -183,26 +217,49 @@ async def test_desired_state_reconciles_missing_service():
 
         await wait_until(
             lambda: (
-                node._service_manager.get_service(service_id)
+                node._service_manager.get_service(
+                    service_id
+                )
                 is not None
             ),
             timeout=10.0,
         )
 
-        node_service = node._service_manager.get_service(service_id)
-        node_process = node._service_manager.get_process(service_id)
+        node_service = (
+            node._service_manager.get_service(
+                service_id
+            )
+        )
+
+        node_process = (
+            node._service_manager.get_process(
+                service_id
+            )
+        )
 
         assert node_service is not None
         assert node_process is not None
+
+        # ServiceManager also currently stores
+        # status as a string.
         assert node_service.status == "running"
+
         assert node_service.pid is not None
-        assert node_service.pid == service.pid
+
+        assert (
+            node_service.pid
+            == service.pid
+        )
 
         # -------------------------------------------------
         # Verify actual OS process
         # -------------------------------------------------
 
-        process = node._service_manager.get_process(service_id)
+        process = (
+            node._service_manager.get_process(
+                service_id
+            )
+        )
 
         assert process is not None
         assert process.returncode is None
@@ -215,12 +272,16 @@ async def test_desired_state_reconciles_missing_service():
         if node_task is not None:
             node_task.cancel()
 
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(
+                asyncio.CancelledError
+            ):
                 await node_task
 
         controller_task.cancel()
 
-        with contextlib.suppress(asyncio.CancelledError):
+        with contextlib.suppress(
+            asyncio.CancelledError
+        ):
             await controller_task
 
         with contextlib.suppress(Exception):
@@ -229,4 +290,4 @@ async def test_desired_state_reconciles_missing_service():
         os.environ.pop(
             "NODEFORGE_AUTH_TOKEN",
             None,
-        ) 
+        )
