@@ -161,8 +161,7 @@ async def test_real_service_failover_between_nodes(
         assert reservation is not None
         assert reservation.node_id == "d68-node-a"
 
-        # Simulate a real Node A failure by stopping
-        # the NodeAgent completely.
+        # Simulate a real Node A failure.
         await node_a.stop()
 
         if node_a_task is not None:
@@ -176,7 +175,7 @@ async def test_real_service_failover_between_nodes(
 
         node_a_task = None
 
-        # Controller must detect that Node A is offline.
+        # Controller must detect Node A as offline.
         assert await wait_for_condition(
             lambda: (
                 controller.registry.get_node(
@@ -191,18 +190,18 @@ async def test_real_service_failover_between_nodes(
             timeout=5.0,
         )
 
-        # The service should no longer be considered
-        # healthy on the failed node.
-        await controller.status_service(
-            node_id="d68-node-a",
-            service_id=service_id,
-        )
-
-        # Build the actual replacement plan from
-        # the Controller's current resource view.
+        # Build the replacement plan from the
+        # Controller's current resource view.
         candidates = (
             controller._build_resource_candidates()
         )
+
+        service = (
+            controller.service_registry
+            .get_service(service_id)
+        )
+
+        assert service is not None
 
         plan = (
             controller.resource_failover
@@ -210,11 +209,7 @@ async def test_real_service_failover_between_nodes(
                 service_id=service_id,
                 source_node_id="d68-node-a",
                 command=command,
-                requirements=(
-                    controller.service_registry
-                    .get_service(service_id)
-                    .requirements
-                ),
+                requirements=service.requirements,
                 nodes=candidates,
             )
         )
