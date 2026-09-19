@@ -361,14 +361,6 @@ class NodeAgent:
                 if process is None:
                     continue
 
-                # A missing returncode normally means that the
-                # subprocess is still running. Verify that
-                # assumption with the real health checker before
-                # skipping restart handling.
-                #
-                # This is important for fast-exiting or zombie
-                # processes where asyncio's returncode may not yet
-                # reflect the actual unhealthy state.
                 if process.returncode is None:
                     health = self._health_checker.check(
                         service
@@ -377,16 +369,8 @@ class NodeAgent:
                     if health == ServiceHealth.HEALTHY:
                         continue
 
-                # The process has exited or failed its runtime
-                # health check.
                 service.mark_crashed()
 
-                # RestartEngine handles:
-                # - restart attempts
-                # - backoff
-                # - process startup
-                # - health verification
-                # - restart exhaustion
                 restarted = await self._restart_engine.restart(
                     service=service,
                     service_manager=self._service_manager,
@@ -397,6 +381,16 @@ class NodeAgent:
                     continue
 
                 # Restart attempts are exhausted.
+                #
+                # The final failed process is no longer a valid
+                # runtime for this service. Remove its stale
+                # process/model entries before notifying the
+                # Controller so migration can deterministically
+                # treat the source as fenced.
+                self._service_manager.cleanup_exited_service(
+                    service.service_id
+                )
+
                 failure_message = BaseMessage(
                     type=MessageType.SERVICE_FAILURE,
                     message_id=str(uuid.uuid4()),
