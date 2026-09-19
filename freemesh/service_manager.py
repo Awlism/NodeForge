@@ -33,6 +33,26 @@ class ServiceManager:
         """Return all registered services."""
         return list(self._service_models.values())
 
+    def cleanup_exited_service(
+        self,
+        service_id: str,
+    ) -> bool:
+        """Remove a service whose process has already exited.
+
+        Running services are never removed by this method.
+        Returns True when an exited service was removed.
+        """
+
+        process = self._services.get(service_id)
+
+        if process is None or process.returncode is None:
+            return False
+
+        self._services.pop(service_id, None)
+        self._service_models.pop(service_id, None)
+
+        return True
+
     async def start_service(
         self,
         service_id: str,
