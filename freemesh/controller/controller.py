@@ -124,9 +124,7 @@ class Controller:
 
         self.failover_manager = FailoverManager()
 
-        # Resource accounting must be created before
-        # the scheduler so the scheduler can make
-        # reservation-aware placement decisions.
+        # Resource accounting must exist before the scheduler.
         self.resource_accounting = ResourceAccounting()
 
         self.resource_scheduler = ResourceScheduler(
@@ -146,6 +144,16 @@ class Controller:
         )
 
         self.migration_registry = MigrationRegistry()
+
+        # IMPORTANT:
+        #
+        # Only one migration transaction may modify resource
+        # accounting at a time.
+        #
+        # Without this lock two simultaneous failures can both
+        # select the same target before either reservation has
+        # been moved, which causes capacity races.
+        self._migration_lock = asyncio.Lock()
 
         self.server: Optional[asyncio.Server] = None
         self._running = False
@@ -179,11 +187,17 @@ class Controller:
             asyncio.Event,
         ] = {}
 
-        # STOP responses normally synchronize service state
-        # automatically. Source fencing during migration is
-        # different: the runtime must stop, but the Controller
-        # must keep the original source metadata until migration
-        # commit/rollback is decided.
+        # Request IDs whose response must NOT synchronize the
+        # canonical ServiceRegistry.
+        #
+        # Used mainly during migration transactions:
+        #
+        # 1. target is started
+        # 2. target is verified
+        # 3. source is fenced
+        # 4. migration commits
+        #
+        # The registry should move only at step 4.
         self._suppress_service_state_sync: set[
             str
         ] = set()
@@ -539,14 +553,11 @@ class Controller:
                 transport,
             )
 
+        except asyncio.CancelledError:
+            raise
+
         except Exception:
-            # Do not mark the node offline here.
-            #
-            # Connection cleanup and failure recovery are
-            # centralized in finally below. If we mark the node
-            # OFFLINE here first, the finally block cannot tell
-            # whether this was a previously healthy node that
-            # actually lost its connection.
+            # Cleanup and recovery happen in finally.
             pass
 
         finally:
@@ -570,10 +581,10 @@ class Controller:
                         node_info.state
                         == NodeState.ONLINE
                     ):
-                        # This was an authenticated and healthy
-                        # node whose connection has now ended.
-                        # Mark it offline before attempting
-                        # service recovery.
+                        # This node was authenticated and online.
+                        #
+                        # Its connection has now ended, therefore
+                        # it must be considered failed immediately.
                         try:
                             self.registry.mark_offline(
                                 node_id
@@ -590,17 +601,17 @@ class Controller:
                                 node_id
                             )
                         except Exception:
-                            # Recovery must never prevent
-                            # transport cleanup.
+                            # Recovery failure must never prevent
+                            # socket cleanup.
                             pass
 
                     else:
-                        # AUTH_FAILED / REGISTERING /
-                        # other non-online states must not
-                        # trigger service migration.
+                        # Registration/authentication failed or
+                        # node never became healthy.
                         self.resource_registry.remove_resources(
                             node_id
                         )
+
                 else:
                     self.resource_registry.remove_resources(
                         node_id
@@ -1151,7 +1162,7 @@ class Controller:
         message: BaseMessage,
         node_id: Optional[str] = None,
     ) -> None:
-        """Store response and synchronize service state."""
+        """Store a service response and synchronize state."""
 
         payload = message.payload
 
@@ -1173,7 +1184,14 @@ class Controller:
             "service_id"
         )
 
-        if service_id:
+        # Migration target requests explicitly suppress registry
+        # synchronization until the transaction commits.
+        sync_registry = (
+            request_id
+            not in self._suppress_service_state_sync
+        )
+
+        if service_id and sync_registry:
             if (
                 message.type
                 == MessageType.SERVICE_START_RESPONSE
@@ -1247,16 +1265,8 @@ class Controller:
                         "status": runtime_status,
                     }
 
-                    # IMPORTANT:
-                    #
-                    # A status response from a node must not
-                    # automatically change canonical service
-                    # ownership when that response says the
-                    # service is absent/stopped.
-                    #
-                    # This prevents the old migration source
-                    # from reclaiming ownership after a successful
-                    # migration.
+                    # Do not move canonical ownership based on
+                    # "not_found" or "stopped" responses.
                     if (
                         payload.get("node_id")
                         and original_runtime_status
@@ -1308,27 +1318,21 @@ class Controller:
                 message.type
                 == MessageType.SERVICE_STOP_RESPONSE
             ):
-                # During source fencing the runtime must stop,
-                # but the source registry state must remain intact
-                # until MigrationManager returns success/failure.
-                if request_id not in (
-                    self._suppress_service_state_sync
-                ):
-                    existing_service = (
-                        self.service_registry.get_service(
-                            service_id
-                        )
+                existing_service = (
+                    self.service_registry.get_service(
+                        service_id
                     )
+                )
 
-                    if existing_service is not None:
-                        self.service_registry.update_service(
-                            service_id=service_id,
-                            status=payload.get(
-                                "status",
-                                "stopped",
-                            ),
-                            pid=None,
-                        )
+                if existing_service is not None:
+                    self.service_registry.update_service(
+                        service_id=service_id,
+                        status=payload.get(
+                            "status",
+                            "stopped",
+                        ),
+                        pid=None,
+                    )
 
         event = (
             self._service_response_events.get(
@@ -1476,14 +1480,22 @@ class Controller:
         ] = None,
         timeout_seconds: float = 10.0,
         reserve_resources: bool = True,
+        update_registry: bool = True,
     ) -> BaseMessage:
         """Request a node to start a service.
 
-        ``reserve_resources`` is normally True.
+        ``reserve_resources`` controls ResourceAccounting.
 
-        During migration it is set to False so the target service
-        can be started and verified before ResourceAccounting is
-        changed. MigrationManager owns the reservation transaction.
+        ``update_registry`` controls ServiceRegistry.
+
+        Migration uses both as transactional controls:
+
+        - reserve_resources=False
+        - update_registry=False
+
+        MigrationManager performs the actual reservation commit,
+        while Controller moves the canonical service ownership
+        only after migration succeeds.
         """
 
         transport = self._active_nodes.get(
@@ -1524,6 +1536,11 @@ class Controller:
             request_id
         ] = event
 
+        if not update_registry:
+            self._suppress_service_state_sync.add(
+                request_id
+            )
+
         message = BaseMessage(
             type=MessageType.SERVICE_START,
             message_id=request_id,
@@ -1556,22 +1573,32 @@ class Controller:
                     "Service start response was not received"
                 )
 
-            if (
+            response_status = (
                 response.payload.get(
                     "status"
                 )
-                == "started"
-            ):
-                self.service_registry.register_service(
-                    service_id=service_id,
-                    node_id=node_id,
-                    status="running",
-                    pid=response.payload.get(
-                        "pid"
-                    ),
-                    command=command,
-                    requirements=requirements,
+                if isinstance(
+                    response.payload,
+                    dict,
                 )
+                else None
+            )
+
+            if response_status in {
+                "started",
+                "running",
+            }:
+                if update_registry:
+                    self.service_registry.register_service(
+                        service_id=service_id,
+                        node_id=node_id,
+                        status="running",
+                        pid=response.payload.get(
+                            "pid"
+                        ),
+                        command=command,
+                        requirements=requirements,
+                    )
 
                 if reserve_resources:
                     existing_reservation = (
@@ -1586,6 +1613,7 @@ class Controller:
                             node_id=node_id,
                             requirements=requirements,
                         )
+
                     elif (
                         existing_reservation.node_id
                         != node_id
@@ -1608,6 +1636,10 @@ class Controller:
                 None,
             )
 
+            self._suppress_service_state_sync.discard(
+                request_id
+            )
+
     # =========================================================
     # SERVICE MIGRATION
     # =========================================================
@@ -1618,7 +1650,25 @@ class Controller:
         failed_node_id: str,
         timeout_seconds: float = 10.0,
     ) -> Optional[BaseMessage]:
-        """Perform a complete resource-aware migration."""
+        """Perform one serialized resource-aware migration."""
+
+        # Serialize migration transactions.
+        #
+        # This is essential for capacity correctness.
+        async with self._migration_lock:
+            return await self._migrate_service_unlocked(
+                service_id=service_id,
+                failed_node_id=failed_node_id,
+                timeout_seconds=timeout_seconds,
+            )
+
+    async def _migrate_service_unlocked(
+        self,
+        service_id: str,
+        failed_node_id: str,
+        timeout_seconds: float = 10.0,
+    ) -> Optional[BaseMessage]:
+        """Execute a migration while holding the migration lock."""
 
         service = (
             self.service_registry.get_service(
@@ -1658,7 +1708,9 @@ class Controller:
         original_pid = service.pid
         original_status = service.status
         original_command = service.command
-        original_requirements = service.requirements
+        original_requirements = (
+            service.requirements
+        )
 
         original_reservation = (
             self.resource_accounting.get(
@@ -1681,10 +1733,14 @@ class Controller:
         )
 
         if plan is None:
-            self.resource_accounting.release(
-                service_id
-            )
-
+            # IMPORTANT:
+            #
+            # Do NOT release the original reservation here.
+            #
+            # The migration has not succeeded. Releasing it at
+            # this point makes ResourceAccounting disagree with
+            # ServiceRegistry and can cause later placement to
+            # overcommit or incorrectly count capacity.
             return BaseMessage(
                 type=(
                     MessageType.SERVICE_START_RESPONSE
@@ -1716,7 +1772,7 @@ class Controller:
             command,
             requirements,
         ):
-            """Start target without reserving resources yet."""
+            """Start target without registry/reservation commit."""
 
             return await self.start_service(
                 node_id=node_id,
@@ -1725,30 +1781,37 @@ class Controller:
                 requirements=requirements,
                 timeout_seconds=timeout_seconds,
                 reserve_resources=False,
+                update_registry=False,
             )
 
         async def verify_target(
             node_id,
             service_id,
         ):
-            """Verify the target runtime."""
+            """Verify the target runtime without registry mutation."""
 
             try:
                 response = await self.status_service(
                     node_id=node_id,
                     service_id=service_id,
                     timeout_seconds=timeout_seconds,
+                    update_registry=False,
                 )
 
-                return (
-                    response.payload.get(
-                        "status"
-                    )
-                    in {
-                        "running",
-                        "started",
-                    }
-                )
+                payload = response.payload
+
+                if not isinstance(
+                    payload,
+                    dict,
+                ):
+                    return False
+
+                return payload.get(
+                    "status"
+                ) in {
+                    "running",
+                    "started",
+                }
 
             except (
                 RuntimeError,
@@ -1773,7 +1836,7 @@ class Controller:
             node_id,
             service_id,
         ):
-            """Fence the source runtime before migration commit."""
+            """Fence the source runtime before commit."""
 
             response = await self.stop_service(
                 node_id=node_id,
@@ -1783,27 +1846,77 @@ class Controller:
                 update_registry=False,
             )
 
-            if response.payload.get(
+            payload = response.payload
+
+            if not isinstance(
+                payload,
+                dict,
+            ):
+                raise RuntimeError(
+                    "Invalid source stop response"
+                )
+
+            if payload.get(
                 "status"
             ) not in {
                 "stopped",
                 "success",
             }:
                 raise RuntimeError(
-                    "Source service could not be stopped before migration commit"
+                    "Source service could not be stopped "
+                    "before migration commit"
                 )
 
             return response
 
-        result = await self.migration_manager.execute(
-            plan=plan,
-            start_service=start_target,
-            verify_service=verify_target,
-            stop_service=stop_target,
-            pre_commit=stop_source_before_commit,
-        )
+        try:
+            result = await self.migration_manager.execute(
+                plan=plan,
+                start_service=start_target,
+                verify_service=verify_target,
+                stop_service=stop_target,
+                pre_commit=stop_source_before_commit,
+            )
+
+        except Exception as exc:
+            self.service_registry.update_service(
+                service_id=service_id,
+                node_id=original_node_id,
+                status=original_status,
+                pid=original_pid,
+                command=original_command,
+                requirements=original_requirements,
+            )
+
+            self.migration_registry.fail(
+                service_id=service_id,
+                error=str(exc),
+                status="failed",
+            )
+
+            return BaseMessage(
+                type=(
+                    MessageType.SERVICE_START_RESPONSE
+                ),
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "status": "failed",
+                    "service_id": service_id,
+                    "source_node_id": (
+                        failed_node_id
+                    ),
+                    "target_node_id": (
+                        plan.target_node_id
+                    ),
+                    "error": str(exc),
+                },
+            )
 
         if result.status == "migrated":
+            # MigrationManager has successfully completed its
+            # reservation transaction.
+            #
+            # Only now do we move canonical service ownership.
             self.service_registry.move_service(
                 service_id=service_id,
                 node_id=plan.target_node_id,
@@ -1861,6 +1974,7 @@ class Controller:
             requirements=original_requirements,
         )
 
+        # Restore the original reservation only when necessary.
         if original_reservation is not None:
             current_reservation = (
                 self.resource_accounting.get(
@@ -1868,18 +1982,46 @@ class Controller:
                 )
             )
 
-            if current_reservation is not None:
+            if current_reservation is None:
+                self.resource_accounting.reserve(
+                    service_id=service_id,
+                    node_id=(
+                        original_reservation.node_id
+                    ),
+                    cpu_cores=(
+                        original_reservation.cpu_cores
+                    ),
+                    memory_mb=(
+                        original_reservation.memory_mb
+                    ),
+                    disk_gb=(
+                        original_reservation.disk_gb
+                    ),
+                )
+
+            elif (
+                current_reservation.node_id
+                != original_reservation.node_id
+            ):
                 self.resource_accounting.release(
                     service_id
                 )
 
-            self.resource_accounting.reserve(
-                service_id=service_id,
-                node_id=original_reservation.node_id,
-                cpu_cores=original_reservation.cpu_cores,
-                memory_mb=original_reservation.memory_mb,
-                disk_gb=original_reservation.disk_gb,
-            )
+                self.resource_accounting.reserve(
+                    service_id=service_id,
+                    node_id=(
+                        original_reservation.node_id
+                    ),
+                    cpu_cores=(
+                        original_reservation.cpu_cores
+                    ),
+                    memory_mb=(
+                        original_reservation.memory_mb
+                    ),
+                    disk_gb=(
+                        original_reservation.disk_gb
+                    ),
+                )
 
         self.migration_registry.fail(
             service_id=service_id,
@@ -1920,17 +2062,7 @@ class Controller:
         release_resources: bool = True,
         update_registry: bool = True,
     ) -> BaseMessage:
-        """Request a node to stop a service.
-
-        ``release_resources`` controls whether ResourceAccounting
-        is changed after a successful stop.
-
-        ``update_registry`` controls whether the Controller's
-        ServiceRegistry is changed after a successful stop.
-
-        Migration source fencing disables both so the runtime can
-        be stopped without prematurely committing source metadata.
-        """
+        """Request a node to stop a service."""
 
         transport = self._active_nodes.get(
             node_id
@@ -1982,9 +2114,18 @@ class Controller:
                     "Service stop response was not received"
                 )
 
-            if response.payload.get(
-                "status"
-            ) in {
+            payload = response.payload
+
+            response_status = (
+                payload.get("status")
+                if isinstance(
+                    payload,
+                    dict,
+                )
+                else None
+            )
+
+            if response_status in {
                 "stopped",
                 "success",
             }:
@@ -1996,10 +2137,7 @@ class Controller:
                 if update_registry:
                     self.service_registry.update_service(
                         service_id=service_id,
-                        status=response.payload.get(
-                            "status",
-                            "stopped",
-                        ),
+                        status="stopped",
                         pid=None,
                     )
 
@@ -2025,8 +2163,14 @@ class Controller:
         node_id: str,
         service_id: str,
         timeout_seconds: float = 10.0,
+        update_registry: bool = True,
     ) -> BaseMessage:
-        """Request and synchronize the current runtime service status."""
+        """Request service status.
+
+        ``update_registry=False`` is used by migration verification
+        and failure detection when the runtime response must not
+        alter canonical ownership.
+        """
 
         transport = self._active_nodes.get(
             node_id
@@ -2044,6 +2188,11 @@ class Controller:
         self._service_response_events[
             request_id
         ] = event
+
+        if not update_registry:
+            self._suppress_service_state_sync.add(
+                request_id
+            )
 
         message = BaseMessage(
             type=MessageType.SERVICE_STATUS,
@@ -2073,89 +2222,85 @@ class Controller:
                     "Service status response was not received"
                 )
 
-            payload = response.payload
+            if update_registry:
+                payload = response.payload
 
-            if isinstance(payload, dict):
-                status = payload.get(
-                    "status"
-                )
-
-                service = (
-                    self.service_registry.get_service(
-                        service_id
+                if isinstance(
+                    payload,
+                    dict,
+                ):
+                    status = payload.get(
+                        "status"
                     )
-                )
 
-                if service is not None and status:
-                    original_runtime_status = status
+                    service = (
+                        self.service_registry.get_service(
+                            service_id
+                        )
+                    )
 
-                    runtime_status = status
+                    if service is not None and status:
+                        original_runtime_status = status
 
-                    if runtime_status == "not_found":
-                        runtime_status = "stopped"
+                        runtime_status = status
 
-                    update_kwargs = {
-                        "service_id": service_id,
-                        "status": runtime_status,
-                    }
+                        if runtime_status == "not_found":
+                            runtime_status = "stopped"
 
-                    # IMPORTANT:
-                    #
-                    # Status "not_found" or "stopped" from a
-                    # node being queried is not authoritative
-                    # ownership information.
-                    #
-                    # In particular, after migration the old
-                    # source node can legitimately report
-                    # "not_found". Updating node_id from that
-                    # response would move the canonical service
-                    # ownership back to the failed source.
-                    if (
-                        payload.get("node_id")
-                        and original_runtime_status
-                        not in {
-                            "not_found",
-                            "stopped",
+                        update_kwargs = {
+                            "service_id": service_id,
+                            "status": runtime_status,
                         }
-                    ):
-                        update_kwargs["node_id"] = (
-                            payload["node_id"]
-                        )
 
-                    if payload.get("command"):
-                        update_kwargs["command"] = (
-                            payload["command"]
-                        )
-
-                    if payload.get(
-                        "requirements"
-                    ) is not None:
-                        try:
-                            update_kwargs[
-                                "requirements"
-                            ] = (
-                                ServiceRequirements.from_dict(
-                                    payload[
-                                        "requirements"
-                                    ]
-                                )
-                            )
-                        except (
-                            TypeError,
-                            ValueError,
+                        # Never change ownership based solely
+                        # on stopped/not_found.
+                        if (
+                            payload.get("node_id")
+                            and original_runtime_status
+                            not in {
+                                "not_found",
+                                "stopped",
+                            }
                         ):
-                            pass
+                            update_kwargs["node_id"] = (
+                                payload["node_id"]
+                            )
 
-                    if runtime_status == "stopped":
-                        update_kwargs["pid"] = None
-                    elif payload.get("pid") is not None:
-                        update_kwargs["pid"] = (
-                            payload["pid"]
+                        if payload.get("command"):
+                            update_kwargs["command"] = (
+                                payload["command"]
+                            )
+
+                        if payload.get(
+                            "requirements"
+                        ) is not None:
+                            try:
+                                update_kwargs[
+                                    "requirements"
+                                ] = (
+                                    ServiceRequirements.from_dict(
+                                        payload[
+                                            "requirements"
+                                        ]
+                                    )
+                                )
+                            except (
+                                TypeError,
+                                ValueError,
+                            ):
+                                pass
+
+                        if runtime_status == "stopped":
+                            update_kwargs["pid"] = None
+
+                        elif payload.get("pid") is not None:
+                            update_kwargs["pid"] = (
+                                payload["pid"]
+                            )
+
+                        self.service_registry.update_service(
+                            **update_kwargs
                         )
-
-                    self.service_registry.update_service(
-                        **update_kwargs
-                    )
 
             return response
 
@@ -2168,6 +2313,10 @@ class Controller:
             self._service_responses.pop(
                 request_id,
                 None,
+            )
+
+            self._suppress_service_state_sync.discard(
+                request_id
             )
 
     # =========================================================
@@ -2235,6 +2384,14 @@ class Controller:
                 failed_node_id=node_id,
             )
 
+        except (
+            RuntimeError,
+            TimeoutError,
+            KeyError,
+            ValueError,
+        ):
+            return
+
         except Exception:
             return
 
@@ -2281,7 +2438,7 @@ class Controller:
     async def _run_background_reconciliation(
         self,
     ) -> None:
-        """Continuously reconcile desired and actual service state."""
+        """Continuously reconcile desired and actual state."""
 
         while self._running:
             try:
@@ -2303,7 +2460,7 @@ class Controller:
     async def _run_service_health_monitor(
         self,
     ) -> None:
-        """Monitor registered services."""
+        """Monitor registered services and trigger recovery."""
 
         while self._running:
             try:
@@ -2326,16 +2483,103 @@ class Controller:
                         }:
                             continue
 
-                        await self.status_service(
-                            node_id=service.node_id,
-                            service_id=service.service_id,
+                        # Do not allow a service on an offline
+                        # node to be queried forever.
+                        node_transport = (
+                            self._active_nodes.get(
+                                service.node_id
+                            )
                         )
+
+                        if node_transport is None:
+                            await self.migrate_service(
+                                service_id=(
+                                    service.service_id
+                                ),
+                                failed_node_id=(
+                                    service.node_id
+                                ),
+                            )
+
+                            continue
+
+                        # Health checks are observational here.
+                        # They must not mutate canonical ownership.
+                        response = (
+                            await self.status_service(
+                                node_id=service.node_id,
+                                service_id=(
+                                    service.service_id
+                                ),
+                                update_registry=False,
+                            )
+                        )
+
+                        payload = response.payload
+
+                        if not isinstance(
+                            payload,
+                            dict,
+                        ):
+                            continue
+
+                        runtime_status = payload.get(
+                            "status"
+                        )
+
+                        if runtime_status in {
+                            "crashed",
+                            "failed",
+                            "not_found",
+                        }:
+                            failure_status = (
+                                "crashed"
+                                if runtime_status
+                                == "not_found"
+                                else runtime_status
+                            )
+
+                            failure_message = BaseMessage(
+                                type=(
+                                    MessageType.SERVICE_FAILURE
+                                ),
+                                message_id=str(
+                                    uuid.uuid4()
+                                ),
+                                payload={
+                                    "service_id": (
+                                        service.service_id
+                                    ),
+                                    "node_id": (
+                                        service.node_id
+                                    ),
+                                    "status": (
+                                        failure_status
+                                    ),
+                                    "error": (
+                                        "Health monitor "
+                                        "detected runtime "
+                                        f"status: "
+                                        f"{runtime_status}"
+                                    ),
+                                    "restart_attempts": 0,
+                                },
+                            )
+
+                            await self._handle_service_failure(
+                                node_id=service.node_id,
+                                message=failure_message,
+                            )
 
                     except (
                         RuntimeError,
                         TimeoutError,
                         KeyError,
+                        ValueError,
                     ):
+                        continue
+
+                    except Exception:
                         continue
 
             except asyncio.CancelledError:
@@ -2384,4 +2628,4 @@ class Controller:
                 break
 
             except Exception:
-                pass
+                continue
