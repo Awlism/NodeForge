@@ -147,10 +147,6 @@ class Controller:
 
         # Only one migration transaction may modify resource
         # accounting at a time.
-        #
-        # Without this lock two simultaneous failures can both
-        # select the same target before either reservation has
-        # been moved, which causes capacity races.
         self._migration_lock = asyncio.Lock()
 
         self.server: Optional[asyncio.Server] = None
@@ -187,15 +183,6 @@ class Controller:
 
         # Request IDs whose response must NOT synchronize the
         # canonical ServiceRegistry.
-        #
-        # Used mainly during migration transactions:
-        #
-        # 1. target is started
-        # 2. target is verified
-        # 3. source is fenced
-        # 4. migration commits
-        #
-        # The registry should move only at step 4.
         self._suppress_service_state_sync: set[
             str
         ] = set()
@@ -280,8 +267,6 @@ class Controller:
             command: str,
             requirements: ServiceRequirements,
         ):
-            """Start a service using automatic placement."""
-
             return await self.start_service_auto(
                 service_id=service_id,
                 command=command,
@@ -299,8 +284,6 @@ class Controller:
         async def stop_service_for_reconcile(
             service_id: str,
         ):
-            """Stop a service on its currently assigned node."""
-
             service = (
                 self.service_registry.get_service(
                     service_id
@@ -318,8 +301,6 @@ class Controller:
         async def migrate_service_for_reconcile(
             service_id: str,
         ):
-            """Migrate a service away from its current node."""
-
             service = (
                 self.service_registry.get_service(
                     service_id
@@ -589,8 +570,6 @@ class Controller:
                             node_id
                         )
 
-                        # A controller shutdown must never be
-                        # interpreted as a node failure.
                         if self._running:
                             try:
                                 await self._recover_services_from_node(
@@ -936,9 +915,6 @@ class Controller:
                         node_id=node_id,
                     )
 
-                else:
-                    continue
-
             except asyncio.CancelledError:
                 break
 
@@ -1247,13 +1223,6 @@ class Controller:
                         runtime_status
                     )
 
-                    # A response from an old/non-owner node
-                    # must never overwrite canonical state when
-                    # it says the service is absent or stopped.
-                    #
-                    # This is particularly important after
-                    # migration: the old node may still answer a
-                    # delayed STATUS request with "not_found".
                     is_current_owner = (
                         node_id is not None
                         and existing_service.node_id
@@ -1279,9 +1248,6 @@ class Controller:
                             "status": runtime_status,
                         }
 
-                        # Ownership may only move when a positive
-                        # runtime state proves that this node is
-                        # actually running the service.
                         if (
                             payload.get("node_id")
                             and original_runtime_status
@@ -1339,8 +1305,6 @@ class Controller:
                     )
                 )
 
-                # A delayed stop response from a previous owner
-                # must not stop a service that has already moved.
                 if (
                     existing_service is not None
                     and (
@@ -1506,14 +1470,7 @@ class Controller:
         reserve_resources: bool = True,
         update_registry: bool = True,
     ) -> BaseMessage:
-        """Request a node to start a service.
-
-        ``reserve_resources`` controls ResourceAccounting.
-
-        ``update_registry`` controls ServiceRegistry.
-
-        Migration uses both as transactional controls.
-        """
+        """Request a node to start a service."""
 
         transport = self._active_nodes.get(
             node_id
@@ -1778,8 +1735,6 @@ class Controller:
             command,
             requirements,
         ):
-            """Start target without registry/reservation commit."""
-
             return await self.start_service(
                 node_id=node_id,
                 service_id=service_id,
@@ -1794,8 +1749,6 @@ class Controller:
             node_id,
             service_id,
         ):
-            """Verify target runtime without registry mutation."""
-
             try:
                 response = await self.status_service(
                     node_id=node_id,
@@ -1820,25 +1773,12 @@ class Controller:
                 }
 
             except Exception:
-                # Verification is observational.
-                #
-                # Any runtime, transport, timeout, or test-double
-                # incompatibility must be treated as a failed
-                # verification so MigrationManager can execute its
-                # normal rollback path and preserve the precise
-                # "verification_failed" result.
-                #
-                # asyncio.CancelledError is intentionally not
-                # caught here because it derives from BaseException
-                # and cancellation must propagate normally.
                 return False
 
         async def stop_target(
             node_id,
             service_id,
         ):
-            """Stop target runtime during rollback."""
-
             return await self.stop_service(
                 node_id=node_id,
                 service_id=service_id,
@@ -1851,12 +1791,21 @@ class Controller:
             node_id,
             service_id,
         ):
-            """Fence the source runtime before migration commit."""
+            """
+            Reliably fence the source runtime before migration
+            commit.
 
-            # If the source node is already disconnected, the old
-            # runtime is considered fenced from the Controller's
-            # perspective.
-            if node_id not in self._active_nodes:
+            The source can legitimately disappear between migration
+            planning and source fencing. This happens when the
+            process crashes, when the NodeAgent notices the crash,
+            or when another recovery operation races with migration.
+
+            Therefore STOP is not treated as the only source of truth.
+            We retry the stop request and independently inspect the
+            runtime state after every attempt.
+            """
+
+            def make_fenced_response():
                 return BaseMessage(
                     type=(
                         MessageType.SERVICE_STOP_RESPONSE
@@ -1870,98 +1819,185 @@ class Controller:
                     },
                 )
 
-            response = await self.stop_service(
-                node_id=node_id,
-                service_id=service_id,
-                timeout_seconds=timeout_seconds,
-                release_resources=False,
-                update_registry=False,
-            )
+            async def read_source_status():
+                """
+                Read source runtime status without modifying the
+                canonical ServiceRegistry.
+                """
 
-            payload = response.payload
+                if node_id not in self._active_nodes:
+                    return None
 
-            response_status = (
-                payload.get("status")
-                if isinstance(
+                try:
+                    response = await self.status_service(
+                        node_id=node_id,
+                        service_id=service_id,
+                        timeout_seconds=min(
+                            timeout_seconds,
+                            5.0,
+                        ),
+                        update_registry=False,
+                    )
+                except (
+                    asyncio.CancelledError,
+                ):
+                    raise
+
+                except Exception:
+                    return None
+
+                payload = response.payload
+
+                if not isinstance(
                     payload,
                     dict,
-                )
-                else None
-            )
+                ):
+                    return None
 
-            # Normal successful fencing.
-            if response_status in {
-                "stopped",
-                "success",
-                "not_found",
-            }:
-                return response
+                return payload
 
-            # The source may already have stopped/crashed between
-            # migration planning and the stop request. In that case
-            # a failed STOP response does not necessarily mean that
-            # the old runtime is still active.
-            #
-            # Verify the actual runtime state before declaring the
-            # migration failed.
-            try:
-                status_response = await self.status_service(
-                    node_id=node_id,
-                    service_id=service_id,
-                    timeout_seconds=5.0,
-                    update_registry=False,
-                )
+            async def source_is_fenced():
+                """
+                Determine whether the source runtime is definitely
+                no longer running.
+                """
 
-                status_payload = (
-                    status_response.payload
-                )
+                # A disconnected source cannot be actively fenced
+                # through the transport, but it is already outside
+                # the reachable runtime set.
+                if node_id not in self._active_nodes:
+                    return True
 
-                actual_status = (
-                    status_payload.get("status")
-                    if isinstance(
-                        status_payload,
-                        dict,
-                    )
-                    else None
+                payload = await read_source_status()
+
+                if payload is None:
+                    return False
+
+                actual_status = payload.get(
+                    "status"
                 )
 
                 if actual_status in {
                     "stopped",
                     "not_found",
                 }:
-                    return status_response
+                    return True
 
-                # A crashed/failed runtime with a confirmed dead
-                # process is also safely fenced.
-                #
-                # Only accept this when returncode is present,
-                # which proves that the process is no longer running.
-                if (
-                    actual_status
-                    in {
-                        "crashed",
-                        "failed",
-                    }
-                    and isinstance(
-                        status_payload,
+                if actual_status in {
+                    "crashed",
+                    "failed",
+                }:
+                    return (
+                        payload.get(
+                            "returncode"
+                        )
+                        is not None
+                    )
+
+                return False
+
+            # -----------------------------------------------------
+            # Fast path:
+            #
+            # The source may already have crashed before the
+            # migration transaction reached the fencing phase.
+            # -----------------------------------------------------
+            if await source_is_fenced():
+                return make_fenced_response()
+
+            last_response = None
+            last_error = None
+
+            # -----------------------------------------------------
+            # STOP + independent STATUS verification.
+            #
+            # Three attempts are intentional. The service monitor,
+            # RestartEngine and migration transaction can all
+            # observe the same process around the same time.
+            # -----------------------------------------------------
+            for attempt in range(3):
+                try:
+                    response = await self.stop_service(
+                        node_id=node_id,
+                        service_id=service_id,
+                        timeout_seconds=timeout_seconds,
+                        release_resources=False,
+                        update_registry=False,
+                    )
+
+                    last_response = response
+                    last_error = None
+
+                    payload = response.payload
+
+                    response_status = (
+                        payload.get("status")
+                        if isinstance(
+                            payload,
+                            dict,
+                        )
+                        else None
+                    )
+
+                    if response_status in {
+                        "stopped",
+                        "success",
+                        "not_found",
+                    }:
+                        return response
+
+                except asyncio.CancelledError:
+                    raise
+
+                except (
+                    RuntimeError,
+                    TimeoutError,
+                    ConnectionError,
+                    OSError,
+                ) as exc:
+                    last_error = exc
+
+                # The STOP response may race with the process exit.
+                # Independently verify the runtime state.
+                if await source_is_fenced():
+                    return make_fenced_response()
+
+                if attempt < 2:
+                    await asyncio.sleep(0.1)
+
+            # -----------------------------------------------------
+            # Final authoritative runtime check.
+            # -----------------------------------------------------
+            if await source_is_fenced():
+                return make_fenced_response()
+
+            if last_error is not None:
+                raise RuntimeError(
+                    "Source service could not be fenced "
+                    "before migration commit: "
+                    f"{last_error}"
+                )
+
+            if last_response is not None:
+                payload = last_response.payload
+
+                response_status = (
+                    payload.get("status")
+                    if isinstance(
+                        payload,
                         dict,
                     )
-                    and status_payload.get(
-                        "returncode"
-                    ) is not None
-                ):
-                    return status_response
+                    else None
+                )
 
-            except (
-                RuntimeError,
-                TimeoutError,
-                KeyError,
-                ValueError,
-            ):
-                pass
+                raise RuntimeError(
+                    "Source service could not be fenced "
+                    "before migration commit "
+                    f"(last status: {response_status!r})"
+                )
 
             raise RuntimeError(
-                "Source service could not be stopped "
+                "Source service could not be fenced "
                 "before migration commit"
             )
 
@@ -1975,9 +2011,6 @@ class Controller:
             )
 
         except Exception as exc:
-            # The MigrationManager normally converts transaction
-            # failures into MigrationResult. This block is only
-            # for unexpected Controller-side exceptions.
             self.service_registry.update_service(
                 service_id=service_id,
                 node_id=original_node_id,
@@ -2012,10 +2045,6 @@ class Controller:
             )
 
         if result.status == "migrated":
-            # MigrationManager has successfully completed its
-            # reservation transaction.
-            #
-            # Only now do we move canonical service ownership.
             self.service_registry.move_service(
                 service_id=service_id,
                 node_id=plan.target_node_id,
@@ -2073,12 +2102,6 @@ class Controller:
             requirements=original_requirements,
         )
 
-        # Restore the original reservation only when necessary.
-        #
-        # If the source was already offline, the recovery path
-        # releases the dead-node reservation before migration.
-        # In that case original_reservation is None and we must
-        # not recreate a reservation on the failed node.
         if original_reservation is not None:
             current_reservation = (
                 self.resource_accounting.get(
@@ -2127,11 +2150,6 @@ class Controller:
                     ),
                 )
 
-        # Preserve the exact transaction result.
-        #
-        # In particular, verification failure must remain
-        # "verification_failed" rather than being collapsed into
-        # the generic "failed" state.
         self.migration_registry.fail(
             service_id=service_id,
             error=(
@@ -2251,9 +2269,6 @@ class Controller:
                         )
                     )
 
-                    # Do not allow a delayed response from a
-                    # previous owner to stop a service that has
-                    # already migrated.
                     if (
                         service is not None
                         and service.node_id == node_id
@@ -2288,12 +2303,7 @@ class Controller:
         timeout_seconds: float = 10.0,
         update_registry: bool = True,
     ) -> BaseMessage:
-        """Request service status.
-
-        ``update_registry=False`` is used by migration verification
-        and failure detection when the runtime response must not
-        alter canonical ownership.
-        """
+        """Request service status."""
 
         transport = self._active_nodes.get(
             node_id
@@ -2365,17 +2375,10 @@ class Controller:
                     if service is not None and status:
                         original_runtime_status = status
 
-                        # Canonical ownership is the authoritative
-                        # source for deciding whether a runtime
-                        # observation may change ServiceRegistry.
                         is_current_owner = (
                             node_id == service.node_id
                         )
 
-                        # A stale response from a previous owner
-                        # saying "not_found" or "stopped" must not
-                        # destroy the canonical state of a service
-                        # that has already migrated.
                         if (
                             not is_current_owner
                             and original_runtime_status
@@ -2396,8 +2399,6 @@ class Controller:
                             "status": runtime_status,
                         }
 
-                        # Only positive runtime states are allowed
-                        # to establish ownership.
                         if (
                             payload.get("node_id")
                             and original_runtime_status
@@ -2495,8 +2496,6 @@ class Controller:
         if service is None:
             return
 
-        # Ignore stale failure reports from an old node after
-        # the service has already migrated elsewhere.
         if service.node_id != node_id:
             return
 
@@ -2564,9 +2563,6 @@ class Controller:
                 }:
                     continue
 
-                # The node is already offline, so its resource
-                # reservation cannot remain attached to it while
-                # failover is being planned.
                 self.resource_accounting.release(
                     service.service_id
                 )
@@ -2645,8 +2641,6 @@ class Controller:
                             )
                         )
 
-                        # If the node itself is gone, this is a
-                        # node failure and migration is appropriate.
                         if node_transport is None:
                             await self.migrate_service(
                                 service_id=(
@@ -2659,9 +2653,6 @@ class Controller:
 
                             continue
 
-                        # Health checks are observational.
-                        # They do not directly mutate canonical
-                        # ownership.
                         response = (
                             await self.status_service(
                                 node_id=service.node_id,
@@ -2684,22 +2675,6 @@ class Controller:
                             "status"
                         )
 
-                        # -------------------------------------------------
-                        # Runtime divergence:
-                        #
-                        # The node is healthy, but the process is missing
-                        # or stopped.
-                        #
-                        # This is NOT automatically a node failure.
-                        #
-                        # We synchronize canonical state to "stopped".
-                        # The desired-state reconciler then sees:
-                        #
-                        #     desired = RUNNING
-                        #     actual  = STOPPED
-                        #
-                        # and starts the service again.
-                        # -------------------------------------------------
                         if runtime_status in {
                             "not_found",
                             "stopped",
@@ -2725,13 +2700,6 @@ class Controller:
 
                             continue
 
-                        # -------------------------------------------------
-                        # Terminal runtime failure:
-                        #
-                        # A crash/failure on an otherwise healthy node
-                        # is handled as service failure and can trigger
-                        # migration.
-                        # -------------------------------------------------
                         if runtime_status in {
                             "crashed",
                             "failed",
