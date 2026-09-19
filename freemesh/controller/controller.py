@@ -555,7 +555,6 @@ class Controller:
             raise
 
         except Exception:
-            # Cleanup and recovery happen in finally.
             pass
 
         finally:
@@ -579,10 +578,6 @@ class Controller:
                         node_info.state
                         == NodeState.ONLINE
                     ):
-                        # This node was authenticated and online.
-                        #
-                        # Its connection has now ended, therefore
-                        # it must be considered failed immediately.
                         try:
                             self.registry.mark_offline(
                                 node_id
@@ -594,25 +589,17 @@ class Controller:
                             node_id
                         )
 
-                        # Do not start recovery while the
-                        # controller itself is shutting down.
-                        #
-                        # Controller.stop() intentionally closes
-                        # all node connections. Those disconnects
-                        # must not be interpreted as node failures.
+                        # A controller shutdown must never be
+                        # interpreted as a node failure.
                         if self._running:
                             try:
                                 await self._recover_services_from_node(
                                     node_id
                                 )
                             except Exception:
-                                # Recovery failure must never prevent
-                                # socket cleanup.
                                 pass
 
                     else:
-                        # Registration/authentication failed or
-                        # node never became healthy.
                         self.resource_registry.remove_resources(
                             node_id
                         )
@@ -1189,8 +1176,6 @@ class Controller:
             "service_id"
         )
 
-        # Migration target requests explicitly suppress registry
-        # synchronization until the transaction commits.
         sync_registry = (
             request_id
             not in self._suppress_service_state_sync
@@ -1262,62 +1247,87 @@ class Controller:
                         runtime_status
                     )
 
-                    if runtime_status == "not_found":
-                        runtime_status = "stopped"
+                    # A response from an old/non-owner node
+                    # must never overwrite canonical state when
+                    # it says the service is absent or stopped.
+                    #
+                    # This is particularly important after
+                    # migration: the old node may still answer a
+                    # delayed STATUS request with "not_found".
+                    is_current_owner = (
+                        node_id is not None
+                        and existing_service.node_id
+                        == node_id
+                    )
 
-                    update_kwargs = {
-                        "service_id": service_id,
-                        "status": runtime_status,
-                    }
-
-                    # Do not move canonical ownership based on
-                    # "not_found" or "stopped" responses.
                     if (
-                        payload.get("node_id")
+                        not is_current_owner
                         and original_runtime_status
-                        not in {
+                        in {
                             "not_found",
                             "stopped",
                         }
                     ):
-                        update_kwargs["node_id"] = (
-                            payload["node_id"]
-                        )
+                        runtime_status = None
 
-                    if payload.get("command"):
-                        update_kwargs["command"] = (
-                            payload["command"]
-                        )
+                    if runtime_status is not None:
+                        if runtime_status == "not_found":
+                            runtime_status = "stopped"
 
-                    if payload.get(
-                        "requirements"
-                    ) is not None:
-                        try:
-                            update_kwargs[
-                                "requirements"
-                            ] = (
-                                ServiceRequirements.from_dict(
-                                    payload[
-                                        "requirements"
-                                    ]
-                                )
-                            )
-                        except (
-                            TypeError,
-                            ValueError,
+                        update_kwargs = {
+                            "service_id": service_id,
+                            "status": runtime_status,
+                        }
+
+                        # Ownership may only move when a positive
+                        # runtime state proves that this node is
+                        # actually running the service.
+                        if (
+                            payload.get("node_id")
+                            and original_runtime_status
+                            not in {
+                                "not_found",
+                                "stopped",
+                            }
                         ):
-                            pass
+                            update_kwargs["node_id"] = (
+                                payload["node_id"]
+                            )
 
-                    if runtime_status == "stopped":
-                        update_kwargs["pid"] = None
-                    elif payload.get("pid") is not None:
-                        update_kwargs["pid"] = (
-                            payload["pid"]
+                        if payload.get("command"):
+                            update_kwargs["command"] = (
+                                payload["command"]
+                            )
+
+                        if payload.get(
+                            "requirements"
+                        ) is not None:
+                            try:
+                                update_kwargs[
+                                    "requirements"
+                                ] = (
+                                    ServiceRequirements.from_dict(
+                                        payload[
+                                            "requirements"
+                                        ]
+                                    )
+                                )
+                            except (
+                                TypeError,
+                                ValueError,
+                            ):
+                                pass
+
+                        if runtime_status == "stopped":
+                            update_kwargs["pid"] = None
+                        elif payload.get("pid") is not None:
+                            update_kwargs["pid"] = (
+                                payload["pid"]
+                            )
+
+                        self.service_registry.update_service(
+                            **update_kwargs
                         )
-
-                    self.service_registry.update_service(
-                        **update_kwargs
-                    )
 
             elif (
                 message.type
@@ -1329,7 +1339,16 @@ class Controller:
                     )
                 )
 
-                if existing_service is not None:
+                # A delayed stop response from a previous owner
+                # must not stop a service that has already moved.
+                if (
+                    existing_service is not None
+                    and (
+                        node_id is None
+                        or existing_service.node_id
+                        == node_id
+                    )
+                ):
                     self.service_registry.update_service(
                         service_id=service_id,
                         status=payload.get(
@@ -1493,14 +1512,7 @@ class Controller:
 
         ``update_registry`` controls ServiceRegistry.
 
-        Migration uses both as transactional controls:
-
-        - reserve_resources=False
-        - update_registry=False
-
-        MigrationManager performs the actual reservation commit,
-        while Controller moves the canonical service ownership
-        only after migration succeeds.
+        Migration uses both as transactional controls.
         """
 
         transport = self._active_nodes.get(
@@ -1657,9 +1669,6 @@ class Controller:
     ) -> Optional[BaseMessage]:
         """Perform one serialized resource-aware migration."""
 
-        # Serialize migration transactions.
-        #
-        # This is essential for capacity correctness.
         async with self._migration_lock:
             return await self._migrate_service_unlocked(
                 service_id=service_id,
@@ -1738,12 +1747,6 @@ class Controller:
         )
 
         if plan is None:
-            # Do NOT release the original reservation here.
-            #
-            # The migration has not succeeded. Releasing it at
-            # this point makes ResourceAccounting disagree with
-            # ServiceRegistry and can cause later placement to
-            # overcommit or incorrectly count capacity.
             return BaseMessage(
                 type=(
                     MessageType.SERVICE_START_RESPONSE
@@ -1827,11 +1830,7 @@ class Controller:
             node_id,
             service_id,
         ):
-            """Stop target runtime during rollback.
-
-            Registry and resource accounting must remain untouched
-            because MigrationManager owns the transaction.
-            """
+            """Stop target runtime during rollback."""
 
             return await self.stop_service(
                 node_id=node_id,
@@ -1847,12 +1846,9 @@ class Controller:
         ):
             """Fence source runtime before migration commit."""
 
-            # The source node may already be disconnected.
-            #
-            # In that case the source runtime is considered fenced
-            # from the Controller's perspective. Trying to send a
-            # SERVICE_STOP request would incorrectly abort migration
-            # with "Node is not connected".
+            # If the source node is already disconnected, the
+            # Controller has already fenced it from the
+            # distributed system perspective.
             if node_id not in self._active_nodes:
                 return BaseMessage(
                     type=(
@@ -1909,6 +1905,9 @@ class Controller:
             )
 
         except Exception as exc:
+            # The MigrationManager normally converts transaction
+            # failures into MigrationResult. This block is only
+            # for unexpected Controller-side exceptions.
             self.service_registry.update_service(
                 service_id=service_id,
                 node_id=original_node_id,
@@ -2006,10 +2005,10 @@ class Controller:
 
         # Restore the original reservation only when necessary.
         #
-        # If the source was already offline, _recover_services_from_node
-        # releases its dead-node reservation before entering migration.
-        # In that case original_reservation is None and we must NOT
-        # recreate a reservation on the failed node.
+        # If the source was already offline, the recovery path
+        # releases the dead-node reservation before migration.
+        # In that case original_reservation is None and we must
+        # not recreate a reservation on the failed node.
         if original_reservation is not None:
             current_reservation = (
                 self.resource_accounting.get(
@@ -2058,6 +2057,11 @@ class Controller:
                     ),
                 )
 
+        # Preserve the exact transaction result.
+        #
+        # In particular, verification failure must remain
+        # "verification_failed" rather than being collapsed into
+        # the generic "failed" state.
         self.migration_registry.fail(
             service_id=service_id,
             error=(
@@ -2171,11 +2175,24 @@ class Controller:
                     )
 
                 if update_registry:
-                    self.service_registry.update_service(
-                        service_id=service_id,
-                        status="stopped",
-                        pid=None,
+                    service = (
+                        self.service_registry.get_service(
+                            service_id
+                        )
                     )
+
+                    # Do not allow a delayed response from a
+                    # previous owner to stop a service that has
+                    # already migrated.
+                    if (
+                        service is not None
+                        and service.node_id == node_id
+                    ):
+                        self.service_registry.update_service(
+                            service_id=service_id,
+                            status="stopped",
+                            pid=None,
+                        )
 
             return response
 
@@ -2278,6 +2295,27 @@ class Controller:
                     if service is not None and status:
                         original_runtime_status = status
 
+                        # Canonical ownership is the authoritative
+                        # source for deciding whether a runtime
+                        # observation may change ServiceRegistry.
+                        is_current_owner = (
+                            node_id == service.node_id
+                        )
+
+                        # A stale response from a previous owner
+                        # saying "not_found" or "stopped" must not
+                        # destroy the canonical state of a service
+                        # that has already migrated.
+                        if (
+                            not is_current_owner
+                            and original_runtime_status
+                            in {
+                                "not_found",
+                                "stopped",
+                            }
+                        ):
+                            return response
+
                         runtime_status = status
 
                         if runtime_status == "not_found":
@@ -2288,8 +2326,8 @@ class Controller:
                             "status": runtime_status,
                         }
 
-                        # Never change ownership based solely
-                        # on stopped/not_found.
+                        # Only positive runtime states are allowed
+                        # to establish ownership.
                         if (
                             payload.get("node_id")
                             and original_runtime_status
@@ -2378,6 +2416,20 @@ class Controller:
         if not service_id:
             return
 
+        service = (
+            self.service_registry.get_service(
+                service_id
+            )
+        )
+
+        if service is None:
+            return
+
+        # Ignore stale failure reports from an old node after
+        # the service has already migrated elsewhere.
+        if service.node_id != node_id:
+            return
+
         status = payload.get(
             "status",
             "crashed",
@@ -2399,15 +2451,6 @@ class Controller:
             reason=reason,
             restart_attempts=restart_attempts,
         )
-
-        service = (
-            self.service_registry.get_service(
-                service_id
-            )
-        )
-
-        if service is None:
-            return
 
         self.service_registry.update_service(
             service_id=service_id,
@@ -2454,9 +2497,6 @@ class Controller:
                 # The node is already offline, so its resource
                 # reservation cannot remain attached to it while
                 # failover is being planned.
-                #
-                # MigrationManager will create a new target
-                # reservation transactionally.
                 self.resource_accounting.release(
                     service.service_id
                 )
@@ -2529,14 +2569,14 @@ class Controller:
                         }:
                             continue
 
-                        # Do not allow a service on an offline
-                        # node to be queried forever.
                         node_transport = (
                             self._active_nodes.get(
                                 service.node_id
                             )
                         )
 
+                        # If the node itself is gone, this is a
+                        # node failure and migration is appropriate.
                         if node_transport is None:
                             await self.migrate_service(
                                 service_id=(
@@ -2549,8 +2589,9 @@ class Controller:
 
                             continue
 
-                        # Health checks are observational here.
-                        # They must not mutate canonical ownership.
+                        # Health checks are observational.
+                        # They do not directly mutate canonical
+                        # ownership.
                         response = (
                             await self.status_service(
                                 node_id=service.node_id,
@@ -2573,22 +2614,58 @@ class Controller:
                             "status"
                         )
 
+                        # -------------------------------------------------
+                        # Runtime divergence:
+                        #
+                        # The node is healthy, but the process is missing
+                        # or stopped.
+                        #
+                        # This is NOT automatically a node failure.
+                        #
+                        # We synchronize canonical state to "stopped".
+                        # The desired-state reconciler then sees:
+                        #
+                        #     desired = RUNNING
+                        #     actual  = STOPPED
+                        #
+                        # and starts the service again.
+                        # -------------------------------------------------
                         if runtime_status in {
-                            "crashed",
-                            "failed",
                             "not_found",
                             "stopped",
                         }:
-                            failure_status = (
-                                "crashed"
-                                if runtime_status
-                                in {
-                                    "not_found",
-                                    "stopped",
-                                }
-                                else runtime_status
+                            current_service = (
+                                self.service_registry.get_service(
+                                    service.service_id
+                                )
                             )
 
+                            if (
+                                current_service is not None
+                                and current_service.node_id
+                                == service.node_id
+                            ):
+                                self.service_registry.update_service(
+                                    service_id=(
+                                        service.service_id
+                                    ),
+                                    status="stopped",
+                                    pid=None,
+                                )
+
+                            continue
+
+                        # -------------------------------------------------
+                        # Terminal runtime failure:
+                        #
+                        # A crash/failure on an otherwise healthy node
+                        # is handled as service failure and can trigger
+                        # migration.
+                        # -------------------------------------------------
+                        if runtime_status in {
+                            "crashed",
+                            "failed",
+                        }:
                             failure_message = BaseMessage(
                                 type=(
                                     MessageType.SERVICE_FAILURE
@@ -2604,7 +2681,7 @@ class Controller:
                                         service.node_id
                                     ),
                                     "status": (
-                                        failure_status
+                                        runtime_status
                                     ),
                                     "error": (
                                         "Health monitor "
