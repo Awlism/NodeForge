@@ -1576,6 +1576,26 @@ class Controller:
         ):
             requirements = ServiceRequirements()
 
+        # Preserve the complete original controller state.
+        #
+        # A migration must behave transactionally from the
+        # controller's point of view. If the target starts but
+        # verification fails, the original source metadata must
+        # be restored exactly.
+        original_node_id = service.node_id
+        original_pid = service.pid
+        original_status = service.status
+        original_command = service.command
+        original_requirements = service.requirements
+
+        # Preserve the original reservation so a failed migration
+        # can restore the exact resource allocation.
+        original_reservation = (
+            self.resource_accounting.get(
+                service_id
+            )
+        )
+
         candidates = self._build_resource_candidates(
             exclude_node_id=failed_node_id,
         )
@@ -1676,10 +1696,23 @@ class Controller:
             ):
                 return False
 
+        async def stop_target(
+            node_id,
+            service_id,
+        ):
+            """Stop the target runtime during rollback."""
+
+            return await self.stop_service(
+                node_id=node_id,
+                service_id=service_id,
+                timeout_seconds=timeout_seconds,
+            )
+
         result = await self.migration_manager.execute(
             plan=plan,
             start_service=start_target,
             verify_service=verify_target,
+            stop_service=stop_target,
         )
 
         if result.status == "migrated":
@@ -1725,6 +1758,46 @@ class Controller:
                         plan.requirements.to_dict()
                     ),
                 },
+            )
+
+        # =====================================================
+        # MIGRATION ROLLBACK
+        # =====================================================
+        #
+        # MigrationManager has already attempted to stop the
+        # target runtime when the target had successfully started.
+        #
+        # Now restore the Controller's source-side state.
+        self.service_registry.update_service(
+            service_id=service_id,
+            node_id=original_node_id,
+            status=original_status,
+            pid=original_pid,
+            command=original_command,
+            requirements=original_requirements,
+        )
+
+        # Controller.stop_service() releases the reservation
+        # during target cleanup. Restore the original reservation
+        # so the source-side accounting remains consistent.
+        if original_reservation is not None:
+            current_reservation = (
+                self.resource_accounting.get(
+                    service_id
+                )
+            )
+
+            if current_reservation is not None:
+                self.resource_accounting.release(
+                    service_id
+                )
+
+            self.resource_accounting.reserve(
+                service_id=service_id,
+                node_id=original_reservation.node_id,
+                cpu_cores=original_reservation.cpu_cores,
+                memory_mb=original_reservation.memory_mb,
+                disk_gb=original_reservation.disk_gb,
             )
 
         self.migration_registry.fail(
