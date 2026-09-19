@@ -382,15 +382,10 @@ class NodeAgent:
 
                 # Restart attempts are exhausted.
                 #
-                # The final failed process is no longer a valid
-                # runtime for this service. Remove its stale
-                # process/model entries before notifying the
-                # Controller so migration can deterministically
-                # treat the source as fenced.
-                self._service_manager.cleanup_exited_service(
-                    service.service_id
-                )
-
+                # Keep the crashed service model available so STATUS
+                # requests can still report its terminal state.
+                # The Controller's migration fencing logic recognizes
+                # a crashed/failed process through its return code.
                 failure_message = BaseMessage(
                     type=MessageType.SERVICE_FAILURE,
                     message_id=str(uuid.uuid4()),
