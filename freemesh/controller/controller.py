@@ -1820,13 +1820,17 @@ class Controller:
                 }
 
             except Exception:
-                # Verification is observational. Any runtime,
-                # transport, timeout, or test/double incompatibility
-                # must be treated as a failed verification so
-                # MigrationManager can perform its normal
-                # transactional rollback and report
-                # "verification_failed" instead of converting the
-                # problem into a generic migration failure.
+                # Verification is observational.
+                #
+                # Any runtime, transport, timeout, or test-double
+                # incompatibility must be treated as a failed
+                # verification so MigrationManager can execute its
+                # normal rollback path and preserve the precise
+                # "verification_failed" result.
+                #
+                # asyncio.CancelledError is intentionally not
+                # caught here because it derives from BaseException
+                # and cancellation must propagate normally.
                 return False
 
         async def stop_target(
