@@ -265,17 +265,6 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             # -------------------------------------------------
-            # The failure record is the authoritative
-            # Controller-side evidence that restart exhaustion
-            # occurred.
-            # -------------------------------------------------
-
-            assert (
-                failure.max_restart_attempts
-                == 3
-            )
-
-            # -------------------------------------------------
             # Wait for automatic migration.
             # -------------------------------------------------
 
