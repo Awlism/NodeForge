@@ -1819,11 +1819,14 @@ class Controller:
                     "started",
                 }
 
-            except (
-                RuntimeError,
-                TimeoutError,
-                KeyError,
-            ):
+            except Exception:
+                # Verification is observational. Any runtime,
+                # transport, timeout, or test/double incompatibility
+                # must be treated as a failed verification so
+                # MigrationManager can perform its normal
+                # transactional rollback and report
+                # "verification_failed" instead of converting the
+                # problem into a generic migration failure.
                 return False
 
         async def stop_target(
