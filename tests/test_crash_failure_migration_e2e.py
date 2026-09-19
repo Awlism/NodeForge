@@ -95,7 +95,9 @@ def print_migration_diagnostic(
             f"  pid          = {service.pid}"
         )
         print(
-            f"  restart      = {service.restart_attempts}"
+            "  restart      = unavailable "
+            "(canonical ServiceInfo does not track "
+            "restart attempts)"
         )
 
     failure = (
@@ -207,11 +209,17 @@ def print_migration_diagnostic(
 
 
 @pytest.mark.asyncio
-async def test_crash_failure_triggers_automatic_migration():
+async def test_crash_failure_triggers_automatic_migration(
+    monkeypatch,
+):
     """A crashing service should migrate after restart exhaustion."""
 
     token = "nodeforge-crash-migration-token"
-    os.environ["NODEFORGE_AUTH_TOKEN"] = token
+
+    monkeypatch.setenv(
+        "NODEFORGE_AUTH_TOKEN",
+        token,
+    )
 
     controller = Controller(
         host="127.0.0.1",
@@ -523,6 +531,22 @@ async def test_crash_failure_triggers_automatic_migration():
 
             assert (
                 node_b_process.returncode
+                is None
+            )
+
+            # The source runtime must have been fenced and
+            # removed from Node A before migration committed.
+            assert (
+                node_a._service_manager.get_service(
+                    service_id
+                )
+                is None
+            )
+
+            assert (
+                node_a._service_manager.get_process(
+                    service_id
+                )
                 is None
             )
 
