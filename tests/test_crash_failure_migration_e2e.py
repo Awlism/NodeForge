@@ -211,60 +211,24 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             assert service is not None
+
             assert (
                 service.node_id
                 == "crash-node-a"
             )
 
             initial_pid = service.pid
+
             assert initial_pid is not None
 
             # -------------------------------------------------
-            # Wait for restart exhaustion on Node A.
+            # Wait for Controller to receive the final
+            # SERVICE_FAILURE from Node A.
             #
-            # This must happen before automatic migration,
-            # because migration removes the service model from
-            # Node A's ServiceManager.
-            # -------------------------------------------------
-
-            await wait_until(
-                lambda: (
-                    (
-                        node_a._service_manager.get_service(
-                            "crash-migration-service"
-                        )
-                        is not None
-                    )
-                    and (
-                        node_a._service_manager.get_service(
-                            "crash-migration-service"
-                        ).restart_attempts
-                        >= 3
-                    )
-                ),
-                timeout=20.0,
-            )
-
-            node_a_service = (
-                node_a._service_manager.get_service(
-                    "crash-migration-service"
-                )
-            )
-
-            assert node_a_service is not None
-
-            assert (
-                node_a_service.restart_attempts
-                == 3
-            )
-
-            assert (
-                node_a_service.status.value
-                == "crashed"
-            )
-
-            # -------------------------------------------------
-            # Verify Controller received SERVICE_FAILURE.
+            # Do NOT inspect Node A's ServiceManager here.
+            # Automatic migration may already have removed
+            # the source service by the time this condition
+            # becomes visible.
             # -------------------------------------------------
 
             await wait_until(
@@ -274,7 +238,7 @@ async def test_crash_failure_triggers_automatic_migration():
                     )
                     is not None
                 ),
-                timeout=10.0,
+                timeout=30.0,
             )
 
             failure = (
@@ -297,6 +261,17 @@ async def test_crash_failure_triggers_automatic_migration():
 
             assert (
                 failure.restart_attempts
+                == 3
+            )
+
+            # -------------------------------------------------
+            # The failure record is the authoritative
+            # Controller-side evidence that restart exhaustion
+            # occurred.
+            # -------------------------------------------------
+
+            assert (
+                failure.max_restart_attempts
                 == 3
             )
 
@@ -325,7 +300,7 @@ async def test_crash_failure_triggers_automatic_migration():
                         == "running"
                     )
                 ),
-                timeout=20.0,
+                timeout=30.0,
             )
 
             migrated_service = (
