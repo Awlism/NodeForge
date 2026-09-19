@@ -86,11 +86,37 @@ class MigrationManager:
             target_node_id=target_node_id,
         )
 
+    async def _rollback_target(
+        self,
+        stop_service: Optional[
+            Callable[..., Awaitable]
+        ],
+        node_id: str,
+        service_id: str,
+    ) -> None:
+        """Stop a target service created by a failed migration."""
+
+        if stop_service is None:
+            return
+
+        try:
+            await stop_service(
+                node_id=node_id,
+                service_id=service_id,
+            )
+        except Exception:
+            # Rollback must never hide the original
+            # migration failure.
+            pass
+
     async def execute(
         self,
         plan: MigrationPlan,
         start_service: Callable[..., Awaitable],
         verify_service: Optional[
+            Callable[..., Awaitable]
+        ] = None,
+        stop_service: Optional[
             Callable[..., Awaitable]
         ] = None,
     ) -> MigrationResult:
@@ -127,6 +153,9 @@ class MigrationManager:
             plan.service_id
         )
 
+        target_started = False
+        target_pid: Optional[int] = None
+
         try:
             response = await start_service(
                 node_id=plan.target_node_id,
@@ -149,7 +178,9 @@ class MigrationManager:
                     ),
                 )
 
-            pid = response.payload.get(
+            target_started = True
+
+            target_pid = response.payload.get(
                 "pid"
             )
 
@@ -160,12 +191,18 @@ class MigrationManager:
                 )
 
                 if not verified:
+                    await self._rollback_target(
+                        stop_service=stop_service,
+                        node_id=plan.target_node_id,
+                        service_id=plan.service_id,
+                    )
+
                     return MigrationResult(
                         service_id=plan.service_id,
                         source_node_id=plan.source_node_id,
                         target_node_id=plan.target_node_id,
                         status="verification_failed",
-                        pid=pid,
+                        pid=target_pid,
                         error=(
                             "Target service failed health verification"
                         ),
@@ -188,10 +225,17 @@ class MigrationManager:
                 source_node_id=plan.source_node_id,
                 target_node_id=plan.target_node_id,
                 status="migrated",
-                pid=pid,
+                pid=target_pid,
             )
 
         except Exception as exc:
+            if target_started:
+                await self._rollback_target(
+                    stop_service=stop_service,
+                    node_id=plan.target_node_id,
+                    service_id=plan.service_id,
+                )
+
             return MigrationResult(
                 service_id=plan.service_id,
                 source_node_id=plan.source_node_id,
