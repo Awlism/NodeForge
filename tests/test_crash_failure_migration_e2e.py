@@ -220,19 +220,27 @@ async def test_crash_failure_triggers_automatic_migration():
             assert initial_pid is not None
 
             # -------------------------------------------------
-            # Wait for Controller to receive SERVICE_FAILURE.
+            # Wait for restart exhaustion on Node A.
             #
-            # This is the externally observable result of
-            # restart exhaustion. It is more robust than
-            # waiting only on NodeAgent's internal timing.
+            # This must happen before automatic migration,
+            # because migration removes the service model from
+            # Node A's ServiceManager.
             # -------------------------------------------------
 
             await wait_until(
                 lambda: (
-                    controller.failure_manager.get_failure(
-                        "crash-migration-service"
+                    (
+                        node_a._service_manager.get_service(
+                            "crash-migration-service"
+                        )
+                        is not None
                     )
-                    is not None
+                    and (
+                        node_a._service_manager.get_service(
+                            "crash-migration-service"
+                        ).restart_attempts
+                        >= 3
+                    )
                 ),
                 timeout=20.0,
             )
@@ -259,6 +267,16 @@ async def test_crash_failure_triggers_automatic_migration():
             # Verify Controller received SERVICE_FAILURE.
             # -------------------------------------------------
 
+            await wait_until(
+                lambda: (
+                    controller.failure_manager.get_failure(
+                        "crash-migration-service"
+                    )
+                    is not None
+                ),
+                timeout=10.0,
+            )
+
             failure = (
                 controller.failure_manager.get_failure(
                     "crash-migration-service"
@@ -266,14 +284,17 @@ async def test_crash_failure_triggers_automatic_migration():
             )
 
             assert failure is not None
+
             assert (
                 failure.node_id
                 == "crash-node-a"
             )
+
             assert (
                 failure.status
                 == "crashed"
             )
+
             assert (
                 failure.restart_attempts
                 == 3
