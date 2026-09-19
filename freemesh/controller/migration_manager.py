@@ -109,6 +109,33 @@ class MigrationManager:
             # migration failure.
             pass
 
+    def _restore_reservation(
+        self,
+        service_id: str,
+        previous_reservation,
+    ) -> None:
+        """Restore the reservation that existed before migration."""
+
+        current_reservation = (
+            self.accounting.get(
+                service_id
+            )
+        )
+
+        if current_reservation is not None:
+            self.accounting.release(
+                service_id
+            )
+
+        if previous_reservation is not None:
+            self.accounting.reserve(
+                service_id=service_id,
+                node_id=previous_reservation.node_id,
+                cpu_cores=previous_reservation.cpu_cores,
+                memory_mb=previous_reservation.memory_mb,
+                disk_gb=previous_reservation.disk_gb,
+            )
+
     async def execute(
         self,
         plan: MigrationPlan,
@@ -119,8 +146,11 @@ class MigrationManager:
         stop_service: Optional[
             Callable[..., Awaitable]
         ] = None,
+        pre_commit: Optional[
+            Callable[..., Awaitable]
+        ] = None,
     ) -> MigrationResult:
-        """Execute START → VERIFY → COMMIT migration."""
+        """Execute START → VERIFY → FENCE → COMMIT migration."""
 
         if not isinstance(
             plan,
@@ -154,6 +184,7 @@ class MigrationManager:
         )
 
         target_started = False
+        reservation_moved = False
         target_pid: Optional[int] = None
 
         try:
@@ -208,6 +239,11 @@ class MigrationManager:
                         ),
                     )
 
+            # Move resource ownership before fencing the source.
+            #
+            # If source fencing fails, the exception path restores
+            # the previous reservation after the target is rolled
+            # back. This keeps resource ownership transactional.
             if previous_reservation is None:
                 self.reserve_service(
                     service_id=plan.service_id,
@@ -218,6 +254,18 @@ class MigrationManager:
                 self.migrate_reservation(
                     service_id=plan.service_id,
                     target_node_id=plan.target_node_id,
+                )
+
+            reservation_moved = True
+
+            # Fence the source runtime before the migration is
+            # considered committed. The Controller supplies this
+            # callback so the source process is actually stopped
+            # without prematurely changing controller metadata.
+            if pre_commit is not None:
+                await pre_commit(
+                    node_id=plan.source_node_id,
+                    service_id=plan.service_id,
                 )
 
             return MigrationResult(
@@ -235,6 +283,20 @@ class MigrationManager:
                     node_id=plan.target_node_id,
                     service_id=plan.service_id,
                 )
+
+            if reservation_moved:
+                try:
+                    self._restore_reservation(
+                        service_id=plan.service_id,
+                        previous_reservation=(
+                            previous_reservation
+                        ),
+                    )
+                except Exception:
+                    # The Controller performs an additional
+                    # source-state restoration after execute()
+                    # returns a failed result.
+                    pass
 
             return MigrationResult(
                 service_id=plan.service_id,
