@@ -1931,6 +1931,27 @@ class Controller:
                 }:
                     return status_response
 
+                # A crashed/failed runtime with a confirmed dead
+                # process is also safely fenced.
+                #
+                # Only accept this when returncode is present,
+                # which proves that the process is no longer running.
+                if (
+                    actual_status
+                    in {
+                        "crashed",
+                        "failed",
+                    }
+                    and isinstance(
+                        status_payload,
+                        dict,
+                    )
+                    and status_payload.get(
+                        "returncode"
+                    ) is not None
+                ):
+                    return status_response
+
             except (
                 RuntimeError,
                 TimeoutError,
