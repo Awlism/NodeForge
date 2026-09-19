@@ -1,3 +1,6 @@
+from freemesh.controller.resource_accounting import (
+    ResourceAccounting,
+)
 from freemesh.node.resources import NodeResources
 from freemesh.scheduler.resource_scheduler import (
     ResourceNodeCandidate,
@@ -443,3 +446,279 @@ def test_scheduler_rejects_invalid_requirements_type():
         assert False
     except TypeError:
         assert True
+
+
+# ============================================================
+# D6.8 RESERVATION-AWARE SCHEDULING
+# ============================================================
+
+
+def test_scheduler_respects_resource_reservations():
+    accounting = ResourceAccounting()
+
+    accounting.reserve(
+        service_id="existing-service",
+        node_id="node-a",
+        cpu_cores=5.0,
+        memory_mb=5000,
+        disk_gb=50,
+    )
+
+    scheduler = ResourceScheduler(
+        accounting=accounting,
+    )
+
+    node_a = ResourceNodeCandidate(
+        node_id="node-a",
+        available=True,
+        running_services=1,
+        resources=make_resources(
+            cpu_cores=8,
+            cpu_usage_percent=20,
+            memory_total_mb=16000,
+            memory_used_mb=2000,
+            disk_total_gb=100,
+            disk_used_gb=20,
+        ),
+    )
+
+    node_b = ResourceNodeCandidate(
+        node_id="node-b",
+        available=True,
+        running_services=1,
+        resources=make_resources(
+            cpu_cores=8,
+            cpu_usage_percent=20,
+            memory_total_mb=16000,
+            memory_used_mb=2000,
+            disk_total_gb=100,
+            disk_used_gb=20,
+        ),
+    )
+
+    requirements = ServiceRequirements(
+        cpu_cores=3,
+        memory_mb=3000,
+        disk_gb=20,
+    )
+
+    selected = scheduler.select_node_for_requirements(
+        [node_a, node_b],
+        requirements,
+    )
+
+    assert selected is node_b
+
+
+def test_scheduler_allows_node_after_reservation_release():
+    accounting = ResourceAccounting()
+
+    accounting.reserve(
+        service_id="existing-service",
+        node_id="node-a",
+        cpu_cores=5.0,
+        memory_mb=5000,
+        disk_gb=50,
+    )
+
+    scheduler = ResourceScheduler(
+        accounting=accounting,
+    )
+
+    node_a = ResourceNodeCandidate(
+        node_id="node-a",
+        available=True,
+        running_services=1,
+        resources=make_resources(
+            cpu_cores=8,
+            cpu_usage_percent=20,
+            memory_total_mb=16000,
+            memory_used_mb=2000,
+            disk_total_gb=100,
+            disk_used_gb=20,
+        ),
+    )
+
+    requirements = ServiceRequirements(
+        cpu_cores=3,
+        memory_mb=3000,
+        disk_gb=20,
+    )
+
+    blocked = scheduler.select_node_for_requirements(
+        [node_a],
+        requirements,
+    )
+
+    assert blocked is None
+
+    accounting.release("existing-service")
+
+    selected = scheduler.select_node_for_requirements(
+        [node_a],
+        requirements,
+    )
+
+    assert selected is node_a
+
+
+def test_scheduler_reservation_does_not_double_count_live_usage():
+    accounting = ResourceAccounting()
+
+    accounting.reserve(
+        service_id="service-1",
+        node_id="node-a",
+        cpu_cores=2.0,
+        memory_mb=2048,
+        disk_gb=10,
+    )
+
+    scheduler = ResourceScheduler(
+        accounting=accounting,
+    )
+
+    node = ResourceNodeCandidate(
+        node_id="node-a",
+        available=True,
+        running_services=1,
+        resources=make_resources(
+            cpu_cores=8,
+            cpu_usage_percent=25,
+            memory_total_mb=16000,
+            memory_used_mb=2048,
+            disk_total_gb=100,
+            disk_used_gb=10,
+        ),
+    )
+
+    requirements = ServiceRequirements(
+        cpu_cores=4,
+        memory_mb=4096,
+        disk_gb=20,
+    )
+
+    selected = scheduler.select_node_for_requirements(
+        [node],
+        requirements,
+    )
+
+    assert selected is node
+
+
+def test_scheduler_blocks_node_when_reservations_exhaust_capacity():
+    accounting = ResourceAccounting()
+
+    accounting.reserve(
+        service_id="service-1",
+        node_id="node-a",
+        cpu_cores=6.0,
+        memory_mb=12000,
+        disk_gb=70,
+    )
+
+    scheduler = ResourceScheduler(
+        accounting=accounting,
+    )
+
+    node = ResourceNodeCandidate(
+        node_id="node-a",
+        available=True,
+        running_services=1,
+        resources=make_resources(
+            cpu_cores=8,
+            cpu_usage_percent=20,
+            memory_total_mb=16000,
+            memory_used_mb=2000,
+            disk_total_gb=100,
+            disk_used_gb=20,
+        ),
+    )
+
+    requirements = ServiceRequirements(
+        cpu_cores=2,
+        memory_mb=3000,
+        disk_gb=20,
+    )
+
+    selected = scheduler.select_node_for_requirements(
+        [node],
+        requirements,
+    )
+
+    assert selected is None
+
+
+def test_scheduler_reservation_aware_failover_selects_second_node():
+    accounting = ResourceAccounting()
+
+    accounting.reserve(
+        service_id="existing-service",
+        node_id="node-a",
+        cpu_cores=6.0,
+        memory_mb=10000,
+        disk_gb=70,
+    )
+
+    scheduler = ResourceScheduler(
+        accounting=accounting,
+    )
+
+    failed_node = ResourceNodeCandidate(
+        node_id="node-failed",
+        available=True,
+        running_services=1,
+        resources=make_resources(
+            cpu_cores=8,
+            cpu_usage_percent=20,
+            memory_total_mb=16000,
+            memory_used_mb=2000,
+            disk_total_gb=100,
+            disk_used_gb=20,
+        ),
+    )
+
+    reserved_node = ResourceNodeCandidate(
+        node_id="node-a",
+        available=True,
+        running_services=1,
+        resources=make_resources(
+            cpu_cores=8,
+            cpu_usage_percent=20,
+            memory_total_mb=16000,
+            memory_used_mb=2000,
+            disk_total_gb=100,
+            disk_used_gb=20,
+        ),
+    )
+
+    healthy_node = ResourceNodeCandidate(
+        node_id="node-b",
+        available=True,
+        running_services=0,
+        resources=make_resources(
+            cpu_cores=8,
+            cpu_usage_percent=10,
+            memory_total_mb=16000,
+            memory_used_mb=2000,
+            disk_total_gb=100,
+            disk_used_gb=20,
+        ),
+    )
+
+    requirements = ServiceRequirements(
+        cpu_cores=3,
+        memory_mb=4000,
+        disk_gb=20,
+    )
+
+    selected = scheduler.select_node_for_requirements(
+        [
+            failed_node,
+            reserved_node,
+            healthy_node,
+        ],
+        requirements,
+        exclude_node_id="node-failed",
+    )
+
+    assert selected is healthy_node
