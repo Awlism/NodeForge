@@ -540,14 +540,14 @@ class Controller:
             )
 
         except Exception:
-            if node_id:
-                try:
-                    self.registry.update_node_state(
-                        node_id,
-                        NodeState.OFFLINE,
-                    )
-                except KeyError:
-                    pass
+            # Do not mark the node offline here.
+            #
+            # Connection cleanup and failure recovery are
+            # centralized in finally below. If we mark the node
+            # OFFLINE here first, the finally block cannot tell
+            # whether this was a previously healthy node that
+            # actually lost its connection.
+            pass
 
         finally:
             if node_id:
@@ -556,12 +556,60 @@ class Controller:
                     None,
                 )
 
-            if node_id:
-                self.resource_registry.remove_resources(
-                    node_id
-                )
+                try:
+                    node_info = (
+                        self.registry.get_node(
+                            node_id
+                        )
+                    )
+                except KeyError:
+                    node_info = None
 
-            await transport.disconnect()
+                if node_info is not None:
+                    if (
+                        node_info.state
+                        == NodeState.ONLINE
+                    ):
+                        # This was an authenticated and healthy
+                        # node whose connection has now ended.
+                        # Mark it offline before attempting
+                        # service recovery.
+                        try:
+                            self.registry.mark_offline(
+                                node_id
+                            )
+                        except KeyError:
+                            pass
+
+                        self.resource_registry.remove_resources(
+                            node_id
+                        )
+
+                        try:
+                            await self._recover_services_from_node(
+                                node_id
+                            )
+                        except Exception:
+                            # Recovery must never prevent
+                            # transport cleanup.
+                            pass
+
+                    else:
+                        # AUTH_FAILED / REGISTERING /
+                        # other non-online states must not
+                        # trigger service migration.
+                        self.resource_registry.remove_resources(
+                            node_id
+                        )
+                else:
+                    self.resource_registry.remove_resources(
+                        node_id
+                    )
+
+            try:
+                await transport.disconnect()
+            except Exception:
+                pass
 
     # =========================================================
     # REGISTRATION / AUTHENTICATION
@@ -1187,6 +1235,10 @@ class Controller:
                         existing_service.status,
                     )
 
+                    original_runtime_status = (
+                        runtime_status
+                    )
+
                     if runtime_status == "not_found":
                         runtime_status = "stopped"
 
@@ -1195,7 +1247,24 @@ class Controller:
                         "status": runtime_status,
                     }
 
-                    if payload.get("node_id"):
+                    # IMPORTANT:
+                    #
+                    # A status response from a node must not
+                    # automatically change canonical service
+                    # ownership when that response says the
+                    # service is absent/stopped.
+                    #
+                    # This prevents the old migration source
+                    # from reclaiming ownership after a successful
+                    # migration.
+                    if (
+                        payload.get("node_id")
+                        and original_runtime_status
+                        not in {
+                            "not_found",
+                            "stopped",
+                        }
+                    ):
                         update_kwargs["node_id"] = (
                             payload["node_id"]
                         )
@@ -2018,6 +2087,8 @@ class Controller:
                 )
 
                 if service is not None and status:
+                    original_runtime_status = status
+
                     runtime_status = status
 
                     if runtime_status == "not_found":
@@ -2028,7 +2099,25 @@ class Controller:
                         "status": runtime_status,
                     }
 
-                    if payload.get("node_id"):
+                    # IMPORTANT:
+                    #
+                    # Status "not_found" or "stopped" from a
+                    # node being queried is not authoritative
+                    # ownership information.
+                    #
+                    # In particular, after migration the old
+                    # source node can legitimately report
+                    # "not_found". Updating node_id from that
+                    # response would move the canonical service
+                    # ownership back to the failed source.
+                    if (
+                        payload.get("node_id")
+                        and original_runtime_status
+                        not in {
+                            "not_found",
+                            "stopped",
+                        }
+                    ):
                         update_kwargs["node_id"] = (
                             payload["node_id"]
                         )
