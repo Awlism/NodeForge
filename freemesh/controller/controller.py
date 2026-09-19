@@ -179,6 +179,15 @@ class Controller:
             asyncio.Event,
         ] = {}
 
+        # STOP responses normally synchronize service state
+        # automatically. Source fencing during migration is
+        # different: the runtime must stop, but the Controller
+        # must keep the original source metadata until migration
+        # commit/rollback is decided.
+        self._suppress_service_state_sync: set[
+            str
+        ] = set()
+
     # =========================================================
     # SERVICE INTENT
     # =========================================================
@@ -470,6 +479,7 @@ class Controller:
 
         self._service_response_events.clear()
         self._service_responses.clear()
+        self._suppress_service_state_sync.clear()
 
         self.resource_accounting.clear()
 
@@ -1177,9 +1187,6 @@ class Controller:
                         existing_service.status,
                     )
 
-                    # A missing process on the node is a
-                    # recoverable stopped state from the
-                    # controller's reconciliation perspective.
                     if runtime_status == "not_found":
                         runtime_status = "stopped"
 
@@ -1232,21 +1239,27 @@ class Controller:
                 message.type
                 == MessageType.SERVICE_STOP_RESPONSE
             ):
-                existing_service = (
-                    self.service_registry.get_service(
-                        service_id
+                # During source fencing the runtime must stop,
+                # but the source registry state must remain intact
+                # until MigrationManager returns success/failure.
+                if request_id not in (
+                    self._suppress_service_state_sync
+                ):
+                    existing_service = (
+                        self.service_registry.get_service(
+                            service_id
+                        )
                     )
-                )
 
-                if existing_service is not None:
-                    self.service_registry.update_service(
-                        service_id=service_id,
-                        status=payload.get(
-                            "status",
-                            "stopped",
-                        ),
-                        pid=None,
-                    )
+                    if existing_service is not None:
+                        self.service_registry.update_service(
+                            service_id=service_id,
+                            status=payload.get(
+                                "status",
+                                "stopped",
+                            ),
+                            pid=None,
+                        )
 
         event = (
             self._service_response_events.get(
@@ -1491,10 +1504,6 @@ class Controller:
                     requirements=requirements,
                 )
 
-                # Normal service starts reserve resources
-                # immediately. Migration starts are different:
-                # MigrationManager reserves only after target
-                # startup and verification succeed.
                 if reserve_resources:
                     existing_reservation = (
                         self.resource_accounting.get(
@@ -1576,20 +1585,12 @@ class Controller:
         ):
             requirements = ServiceRequirements()
 
-        # Preserve the complete original controller state.
-        #
-        # A migration must behave transactionally from the
-        # controller's point of view. If the target starts but
-        # verification fails, the original source metadata must
-        # be restored exactly.
         original_node_id = service.node_id
         original_pid = service.pid
         original_status = service.status
         original_command = service.command
         original_requirements = service.requirements
 
-        # Preserve the original reservation so a failed migration
-        # can restore the exact resource allocation.
         original_reservation = (
             self.resource_accounting.get(
                 service_id
@@ -1610,16 +1611,6 @@ class Controller:
             )
         )
 
-        # No target has enough capacity.
-        #
-        # The old reservation belongs to the failed node and must
-        # not remain in ResourceAccounting, otherwise the failed
-        # node continues to consume a reservation forever and the
-        # service is incorrectly counted as allocated there.
-        #
-        # We intentionally keep the desired state unchanged.
-        # Reconciliation can retry the migration later when a
-        # suitable node becomes available.
         if plan is None:
             self.resource_accounting.release(
                 service_id
@@ -1656,9 +1647,8 @@ class Controller:
             command,
             requirements,
         ):
-            # Do not reserve target resources yet.
-            # MigrationManager performs reservation only after
-            # the target service has started and been verified.
+            """Start target without reserving resources yet."""
+
             return await self.start_service(
                 node_id=node_id,
                 service_id=service_id,
@@ -1672,6 +1662,8 @@ class Controller:
             node_id,
             service_id,
         ):
+            """Verify the target runtime."""
+
             try:
                 response = await self.status_service(
                     node_id=node_id,
@@ -1708,11 +1700,38 @@ class Controller:
                 timeout_seconds=timeout_seconds,
             )
 
+        async def stop_source_before_commit(
+            node_id,
+            service_id,
+        ):
+            """Fence the source runtime before migration commit."""
+
+            response = await self.stop_service(
+                node_id=node_id,
+                service_id=service_id,
+                timeout_seconds=timeout_seconds,
+                release_resources=False,
+                update_registry=False,
+            )
+
+            if response.payload.get(
+                "status"
+            ) not in {
+                "stopped",
+                "success",
+            }:
+                raise RuntimeError(
+                    "Source service could not be stopped before migration commit"
+                )
+
+            return response
+
         result = await self.migration_manager.execute(
             plan=plan,
             start_service=start_target,
             verify_service=verify_target,
             stop_service=stop_target,
+            pre_commit=stop_source_before_commit,
         )
 
         if result.status == "migrated":
@@ -1763,11 +1782,7 @@ class Controller:
         # =====================================================
         # MIGRATION ROLLBACK
         # =====================================================
-        #
-        # MigrationManager has already attempted to stop the
-        # target runtime when the target had successfully started.
-        #
-        # Now restore the Controller's source-side state.
+
         self.service_registry.update_service(
             service_id=service_id,
             node_id=original_node_id,
@@ -1777,9 +1792,6 @@ class Controller:
             requirements=original_requirements,
         )
 
-        # Controller.stop_service() releases the reservation
-        # during target cleanup. Restore the original reservation
-        # so the source-side accounting remains consistent.
         if original_reservation is not None:
             current_reservation = (
                 self.resource_accounting.get(
@@ -1836,8 +1848,20 @@ class Controller:
         node_id: str,
         service_id: str,
         timeout_seconds: float = 10.0,
+        release_resources: bool = True,
+        update_registry: bool = True,
     ) -> BaseMessage:
-        """Request a node to stop a service."""
+        """Request a node to stop a service.
+
+        ``release_resources`` controls whether ResourceAccounting
+        is changed after a successful stop.
+
+        ``update_registry`` controls whether the Controller's
+        ServiceRegistry is changed after a successful stop.
+
+        Migration source fencing disables both so the runtime can
+        be stopped without prematurely committing source metadata.
+        """
 
         transport = self._active_nodes.get(
             node_id
@@ -1855,6 +1879,11 @@ class Controller:
         self._service_response_events[
             request_id
         ] = event
+
+        if not update_registry:
+            self._suppress_service_state_sync.add(
+                request_id
+            )
 
         message = BaseMessage(
             type=MessageType.SERVICE_STOP,
@@ -1890,18 +1919,20 @@ class Controller:
                 "stopped",
                 "success",
             }:
-                self.resource_accounting.release(
-                    service_id
-                )
+                if release_resources:
+                    self.resource_accounting.release(
+                        service_id
+                    )
 
-                self.service_registry.update_service(
-                    service_id=service_id,
-                    status=response.payload.get(
-                        "status",
-                        "stopped",
-                    ),
-                    pid=None,
-                )
+                if update_registry:
+                    self.service_registry.update_service(
+                        service_id=service_id,
+                        status=response.payload.get(
+                            "status",
+                            "stopped",
+                        ),
+                        pid=None,
+                    )
 
             return response
 
@@ -1914,6 +1945,10 @@ class Controller:
             self._service_responses.pop(
                 request_id,
                 None,
+            )
+
+            self._suppress_service_state_sync.discard(
+                request_id
             )
 
     async def status_service(
