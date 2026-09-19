@@ -123,7 +123,15 @@ class Controller:
         self.failure_manager = FailureManager()
 
         self.failover_manager = FailoverManager()
-        self.resource_scheduler = ResourceScheduler()
+
+        # Resource accounting must be created before
+        # the scheduler so the scheduler can make
+        # reservation-aware placement decisions.
+        self.resource_accounting = ResourceAccounting()
+
+        self.resource_scheduler = ResourceScheduler(
+            accounting=self.resource_accounting,
+        )
 
         self.service_placement = ServicePlacement(
             scheduler=self.resource_scheduler,
@@ -132,8 +140,6 @@ class Controller:
         self.resource_failover = ResourceFailover(
             scheduler=self.resource_scheduler,
         )
-
-        self.resource_accounting = ResourceAccounting()
 
         self.migration_manager = MigrationManager(
             accounting=self.resource_accounting,
