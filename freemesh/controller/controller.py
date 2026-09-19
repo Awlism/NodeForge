@@ -1851,11 +1851,11 @@ class Controller:
             node_id,
             service_id,
         ):
-            """Fence source runtime before migration commit."""
+            """Fence the source runtime before migration commit."""
 
-            # If the source node is already disconnected, the
-            # Controller has already fenced it from the
-            # distributed system perspective.
+            # If the source node is already disconnected, the old
+            # runtime is considered fenced from the Controller's
+            # perspective.
             if node_id not in self._active_nodes:
                 return BaseMessage(
                     type=(
@@ -1880,27 +1880,69 @@ class Controller:
 
             payload = response.payload
 
-            if not isinstance(
-                payload,
-                dict,
-            ):
-                raise RuntimeError(
-                    "Invalid source stop response"
+            response_status = (
+                payload.get("status")
+                if isinstance(
+                    payload,
+                    dict,
                 )
+                else None
+            )
 
-            if payload.get(
-                "status"
-            ) not in {
+            # Normal successful fencing.
+            if response_status in {
                 "stopped",
                 "success",
                 "not_found",
             }:
-                raise RuntimeError(
-                    "Source service could not be stopped "
-                    "before migration commit"
+                return response
+
+            # The source may already have stopped/crashed between
+            # migration planning and the stop request. In that case
+            # a failed STOP response does not necessarily mean that
+            # the old runtime is still active.
+            #
+            # Verify the actual runtime state before declaring the
+            # migration failed.
+            try:
+                status_response = await self.status_service(
+                    node_id=node_id,
+                    service_id=service_id,
+                    timeout_seconds=5.0,
+                    update_registry=False,
                 )
 
-            return response
+                status_payload = (
+                    status_response.payload
+                )
+
+                actual_status = (
+                    status_payload.get("status")
+                    if isinstance(
+                        status_payload,
+                        dict,
+                    )
+                    else None
+                )
+
+                if actual_status in {
+                    "stopped",
+                    "not_found",
+                }:
+                    return status_response
+
+            except (
+                RuntimeError,
+                TimeoutError,
+                KeyError,
+                ValueError,
+            ):
+                pass
+
+            raise RuntimeError(
+                "Source service could not be stopped "
+                "before migration commit"
+            )
 
         try:
             result = await self.migration_manager.execute(
