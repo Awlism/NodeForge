@@ -27,7 +27,22 @@ class MigrationResult:
 
 
 class MigrationManager:
-    """Coordinate the complete migration lifecycle."""
+    """Coordinate transactional service migrations.
+
+    Migration is intentionally split into two responsibilities:
+
+    1. Runtime orchestration:
+       - start target
+       - verify target
+       - fence source
+    2. Resource transaction:
+       - create or move reservation
+       - restore reservation on rollback
+
+    The Controller owns the canonical ServiceRegistry state.
+    MigrationManager must therefore never directly modify
+    ServiceRegistry.
+    """
 
     def __init__(
         self,
@@ -35,16 +50,27 @@ class MigrationManager:
     ) -> None:
         self.accounting = (
             accounting
-            or ResourceAccounting()
+            if accounting is not None
+            else ResourceAccounting()
         )
 
         self._active_migrations: set[str] = set()
+
+    # =========================================================
+    # MIGRATION STATE
+    # =========================================================
 
     def is_migrating(
         self,
         service_id: str,
     ) -> bool:
+        """Return whether a service is currently migrating."""
+
         return service_id in self._active_migrations
+
+    # =========================================================
+    # RESOURCE RESERVATION HELPERS
+    # =========================================================
 
     def reserve_service(
         self,
@@ -52,12 +78,15 @@ class MigrationManager:
         node_id: str,
         requirements: ServiceRequirements,
     ) -> None:
+        """Reserve resources for a service on a node."""
+
         if not isinstance(
             requirements,
             ServiceRequirements,
         ):
             raise TypeError(
-                "requirements must be a ServiceRequirements instance"
+                "requirements must be a "
+                "ServiceRequirements instance"
             )
 
         self.accounting.reserve(
@@ -72,6 +101,8 @@ class MigrationManager:
         self,
         service_id: str,
     ) -> None:
+        """Release a service resource reservation."""
+
         self.accounting.release(
             service_id
         )
@@ -81,20 +112,30 @@ class MigrationManager:
         service_id: str,
         target_node_id: str,
     ):
+        """Move an existing reservation to another node."""
+
         return self.accounting.move(
             service_id=service_id,
             target_node_id=target_node_id,
         )
 
+    # =========================================================
+    # ROLLBACK HELPERS
+    # =========================================================
+
     async def _rollback_target(
         self,
-        stop_service: Optional[
-            Callable[..., Awaitable]
-        ],
+        stop_service,
         node_id: str,
         service_id: str,
     ) -> None:
-        """Stop a target service created by a failed migration."""
+        """Stop a target that was started by a failed migration.
+
+        The supplied stop callback is expected to disable registry
+        and resource-accounting side effects. MigrationManager owns
+        the transaction and therefore rollback must remain isolated
+        from canonical service state.
+        """
 
         if stop_service is None:
             return
@@ -105,8 +146,8 @@ class MigrationManager:
                 service_id=service_id,
             )
         except Exception:
-            # Rollback must never hide the original
-            # migration failure.
+            # Rollback is best-effort. The original migration
+            # failure must still be reported to the caller.
             pass
 
     def _restore_reservation(
@@ -114,43 +155,66 @@ class MigrationManager:
         service_id: str,
         previous_reservation,
     ) -> None:
-        """Restore the reservation that existed before migration."""
+        """Restore the reservation that existed before migration.
 
-        current_reservation = (
-            self.accounting.get(
-                service_id
-            )
+        If there was no previous reservation, the service must remain
+        unreserved after rollback. This is important when migration
+        starts from an already-failed/offline node whose reservation
+        was intentionally released before planning.
+        """
+
+        current = self.accounting.get(
+            service_id
         )
 
-        if current_reservation is not None:
+        if current is not None:
             self.accounting.release(
                 service_id
             )
 
-        if previous_reservation is not None:
-            self.accounting.reserve(
-                service_id=service_id,
-                node_id=previous_reservation.node_id,
-                cpu_cores=previous_reservation.cpu_cores,
-                memory_mb=previous_reservation.memory_mb,
-                disk_gb=previous_reservation.disk_gb,
-            )
+        if previous_reservation is None:
+            return
+
+        self.accounting.reserve(
+            service_id=service_id,
+            node_id=previous_reservation.node_id,
+            cpu_cores=previous_reservation.cpu_cores,
+            memory_mb=previous_reservation.memory_mb,
+            disk_gb=previous_reservation.disk_gb,
+        )
+
+    # =========================================================
+    # MIGRATION EXECUTION
+    # =========================================================
 
     async def execute(
         self,
         plan: MigrationPlan,
-        start_service: Callable[..., Awaitable],
-        verify_service: Optional[
-            Callable[..., Awaitable]
-        ] = None,
-        stop_service: Optional[
-            Callable[..., Awaitable]
-        ] = None,
-        pre_commit: Optional[
-            Callable[..., Awaitable]
-        ] = None,
+        start_service,
+        verify_service=None,
+        stop_service=None,
+        pre_commit=None,
     ) -> MigrationResult:
-        """Execute START → VERIFY → FENCE → COMMIT migration."""
+        """Execute a transactional service migration.
+
+        Transaction order:
+
+        1. Capture the original resource reservation.
+        2. Start the target service.
+        3. Verify the target service.
+        4. Commit the resource reservation move/create.
+        5. Fence the source service.
+        6. Return a successful migration result.
+
+        If any step fails:
+
+        - target is stopped when necessary;
+        - resource accounting is restored;
+        - no ServiceRegistry mutation is performed here.
+
+        The Controller performs the final canonical registry commit
+        only after this method returns ``status="migrated"``.
+        """
 
         if not isinstance(
             plan,
@@ -169,7 +233,8 @@ class MigrationManager:
                 target_node_id=plan.target_node_id,
                 status="already_migrating",
                 error=(
-                    "Service migration already in progress"
+                    "Service migration already "
+                    "in progress"
                 ),
             )
 
@@ -184,10 +249,14 @@ class MigrationManager:
         )
 
         target_started = False
-        reservation_moved = False
+        reservation_changed = False
         target_pid: Optional[int] = None
 
         try:
+            # =================================================
+            # STEP 1: START TARGET
+            # =================================================
+
             response = await start_service(
                 node_id=plan.target_node_id,
                 service_id=plan.service_id,
@@ -195,25 +264,56 @@ class MigrationManager:
                 requirements=plan.requirements,
             )
 
-            if response.payload.get(
-                "status"
-            ) != "started":
+            payload = response.payload
+
+            if not isinstance(
+                payload,
+                dict,
+            ):
                 return MigrationResult(
                     service_id=plan.service_id,
                     source_node_id=plan.source_node_id,
                     target_node_id=plan.target_node_id,
                     status="failed",
-                    error=response.payload.get(
-                        "error",
-                        "Target node failed to start service",
+                    error=(
+                        "Invalid target start "
+                        "response"
+                    ),
+                )
+
+            target_status = payload.get(
+                "status"
+            )
+
+            if target_status not in {
+                "started",
+                "running",
+            }:
+                return MigrationResult(
+                    service_id=plan.service_id,
+                    source_node_id=plan.source_node_id,
+                    target_node_id=plan.target_node_id,
+                    status="failed",
+                    error=(
+                        payload.get(
+                            "error"
+                        )
+                        or (
+                            "Target node failed "
+                            "to start service"
+                        )
                     ),
                 )
 
             target_started = True
 
-            target_pid = response.payload.get(
+            target_pid = payload.get(
                 "pid"
             )
+
+            # =================================================
+            # STEP 2: VERIFY TARGET
+            # =================================================
 
             if verify_service is not None:
                 verified = await verify_service(
@@ -235,15 +335,21 @@ class MigrationManager:
                         status="verification_failed",
                         pid=target_pid,
                         error=(
-                            "Target service failed health verification"
+                            "Target service failed "
+                            "health verification"
                         ),
                     )
 
-            # Move resource ownership before fencing the source.
+            # =================================================
+            # STEP 3: RESOURCE COMMIT
+            # =================================================
             #
-            # If source fencing fails, the exception path restores
-            # the previous reservation after the target is rolled
-            # back. This keeps resource ownership transactional.
+            # Resource accounting is intentionally changed only
+            # after target start + verification succeed.
+            #
+            # If there was an existing reservation, move it.
+            # If there was no reservation, create one.
+
             if previous_reservation is None:
                 self.reserve_service(
                     service_id=plan.service_id,
@@ -256,17 +362,27 @@ class MigrationManager:
                     target_node_id=plan.target_node_id,
                 )
 
-            reservation_moved = True
+            reservation_changed = True
 
-            # Fence the source runtime before the migration is
-            # considered committed. The Controller supplies this
-            # callback so the source process is actually stopped
-            # without prematurely changing controller metadata.
+            # =================================================
+            # STEP 4: SOURCE FENCE
+            # =================================================
+            #
+            # This callback is responsible only for ensuring that
+            # the old runtime can no longer be considered active.
+            #
+            # The callback may treat an already-disconnected source
+            # as successfully fenced.
+
             if pre_commit is not None:
                 await pre_commit(
                     node_id=plan.source_node_id,
                     service_id=plan.service_id,
                 )
+
+            # =================================================
+            # STEP 5: SUCCESS
+            # =================================================
 
             return MigrationResult(
                 service_id=plan.service_id,
@@ -277,6 +393,10 @@ class MigrationManager:
             )
 
         except Exception as exc:
+            # =================================================
+            # ROLLBACK TARGET
+            # =================================================
+
             if target_started:
                 await self._rollback_target(
                     stop_service=stop_service,
@@ -284,7 +404,11 @@ class MigrationManager:
                     service_id=plan.service_id,
                 )
 
-            if reservation_moved:
+            # =================================================
+            # ROLLBACK RESOURCES
+            # =================================================
+
+            if reservation_changed:
                 try:
                     self._restore_reservation(
                         service_id=plan.service_id,
@@ -293,9 +417,7 @@ class MigrationManager:
                         ),
                     )
                 except Exception:
-                    # The Controller performs an additional
-                    # source-state restoration after execute()
-                    # returns a failed result.
+                    # Preserve the original migration error.
                     pass
 
             return MigrationResult(
