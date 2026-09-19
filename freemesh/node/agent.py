@@ -10,7 +10,7 @@ from freemesh.node.resources import collect_node_resources
 from freemesh.protocol.messages import BaseMessage, MessageType
 from freemesh.protocol.transport import TCPTransport
 from freemesh.restart_engine import RestartEngine
-from freemesh.service import ServiceStatus
+from freemesh.service import ServiceHealth, ServiceStatus
 from freemesh.service_health import ServiceHealthChecker
 from freemesh.service_manager import ServiceManager
 from freemesh.service_requirements import ServiceRequirements
@@ -361,16 +361,24 @@ class NodeAgent:
                 if process is None:
                     continue
 
-                # The process is still alive.
+                # A missing returncode normally means that the
+                # subprocess is still running. Verify that
+                # assumption with the real health checker before
+                # skipping restart handling.
                 #
-                # The HealthChecker verifies the actual OS
-                # process instead of assuming that a PID means
-                # healthy.
+                # This is important for fast-exiting or zombie
+                # processes where asyncio's returncode may not yet
+                # reflect the actual unhealthy state.
                 if process.returncode is None:
-                    self._health_checker.check(service)
-                    continue
+                    health = self._health_checker.check(
+                        service
+                    )
 
-                # The process has exited.
+                    if health == ServiceHealth.HEALTHY:
+                        continue
+
+                # The process has exited or failed its runtime
+                # health check.
                 service.mark_crashed()
 
                 # RestartEngine handles:
