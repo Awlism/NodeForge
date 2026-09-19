@@ -153,6 +153,15 @@ async def test_real_service_failover_between_nodes(
             )
         )
 
+        service = (
+            controller.service_registry
+            .get_service(service_id)
+        )
+
+        assert service is not None
+        assert service.node_id == "d68-node-a"
+        assert service.status == "running"
+
         reservation = (
             controller.resource_accounting
             .get(service_id)
@@ -161,7 +170,10 @@ async def test_real_service_failover_between_nodes(
         assert reservation is not None
         assert reservation.node_id == "d68-node-a"
 
-        # Simulate a real Node A failure.
+        # -----------------------------------------------------
+        # Simulate complete failure of Node A.
+        # -----------------------------------------------------
+
         await node_a.stop()
 
         if node_a_task is not None:
@@ -190,71 +202,44 @@ async def test_real_service_failover_between_nodes(
             timeout=5.0,
         )
 
-        # Build the replacement plan from the
-        # Controller's current resource view.
-        candidates = (
-            controller._build_resource_candidates()
+        # Node B must remain online.
+        assert (
+            controller.registry.get_node(
+                "d68-node-b"
+            ).state
+            == NodeState.ONLINE
         )
 
-        service = (
-            controller.service_registry
-            .get_service(service_id)
+        # -----------------------------------------------------
+        # Execute the real Controller-level failover path.
+        # -----------------------------------------------------
+
+        migrated = await controller.migrate_service(
+            service_id=service_id,
+            failed_node_id="d68-node-a",
         )
 
-        assert service is not None
+        assert migrated is not None
 
-        plan = (
-            controller.resource_failover
-            .create_migration_plan(
-                service_id=service_id,
-                source_node_id="d68-node-a",
-                command=command,
-                requirements=service.requirements,
-                nodes=candidates,
-            )
+        assert (
+            migrated.payload["status"]
+            == "migrated"
         )
 
-        assert plan is not None
-        assert plan.source_node_id == "d68-node-a"
-        assert plan.target_node_id == "d68-node-b"
-
-        async def verify_target(
-            node_id,
-            service_id,
-        ):
-            response = await controller.status_service(
-                node_id=node_id,
-                service_id=service_id,
-            )
-
-            return (
-                response.payload.get("status")
-                == "running"
-            )
-
-        result = (
-            await controller.migration_manager.execute(
-                plan=plan,
-                start_service=controller.start_service,
-                verify_service=verify_target,
-            )
+        assert (
+            migrated.payload["source_node_id"]
+            == "d68-node-a"
         )
 
-        assert result.status == "migrated"
-        assert result.source_node_id == "d68-node-a"
-        assert result.target_node_id == "d68-node-b"
-
-        # Reservation must move with the service.
-        reservation = (
-            controller.resource_accounting
-            .get(service_id)
+        assert (
+            migrated.payload["target_node_id"]
+            == "d68-node-b"
         )
 
-        assert reservation is not None
-        assert reservation.node_id == "d68-node-b"
+        # -----------------------------------------------------
+        # Verify Controller service state.
+        # -----------------------------------------------------
 
-        # Controller's service registry must now point
-        # to the recovered runtime service.
         service = (
             controller.service_registry
             .get_service(service_id)
@@ -263,6 +248,30 @@ async def test_real_service_failover_between_nodes(
         assert service is not None
         assert service.status == "running"
         assert service.node_id == "d68-node-b"
+
+        # -----------------------------------------------------
+        # Verify Resource Accounting moved reservation.
+        # -----------------------------------------------------
+
+        reservation = (
+            controller.resource_accounting
+            .get(service_id)
+        )
+
+        assert reservation is not None
+        assert reservation.node_id == "d68-node-b"
+
+        # -----------------------------------------------------
+        # Verify actual runtime on Node B.
+        # -----------------------------------------------------
+
+        assert await wait_for_condition(
+            lambda: (
+                node_b._service_manager
+                .get_service(service_id)
+                is not None
+            )
+        )
 
         recovered = await controller.status_service(
             node_id="d68-node-b",
@@ -274,13 +283,18 @@ async def test_real_service_failover_between_nodes(
             == "running"
         )
 
-        # Node B must actually contain the runtime service.
-        assert await wait_for_condition(
-            lambda: (
-                node_b._service_manager
-                .get_service(service_id)
-                is not None
-            )
+        # -----------------------------------------------------
+        # Verify Desired State survived the failure.
+        # -----------------------------------------------------
+
+        intent = controller.get_service_intent(
+            service_id
+        )
+
+        assert intent is not None
+        assert (
+            intent.desired_state
+            == DesiredState.RUNNING
         )
 
     finally:
