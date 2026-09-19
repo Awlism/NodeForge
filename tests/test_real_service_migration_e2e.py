@@ -361,6 +361,46 @@ async def test_real_service_migration_e2e(
             == new_pid
         )
 
+        # D6.13: the source runtime must no longer exist
+        # after a successful migration.
+        source_status_after = (
+            await controller.status_service(
+                node_id="migration-node-a",
+                service_id=service_id,
+                timeout_seconds=10.0,
+            )
+        )
+
+        assert (
+            source_status_after.payload["status"]
+            == "not_found"
+        )
+
+        # The Controller registry must still point to the
+        # migrated target, despite the source returning not_found.
+        registry_after_source_check = (
+            controller.service_registry.get_service(
+                service_id
+            )
+        )
+
+        assert registry_after_source_check is not None
+
+        assert (
+            registry_after_source_check.node_id
+            == "migration-node-b"
+        )
+
+        assert (
+            registry_after_source_check.status
+            == "running"
+        )
+
+        assert (
+            registry_after_source_check.pid
+            == new_pid
+        )
+
         stop_response = (
             await controller.stop_service(
                 node_id="migration-node-b",
