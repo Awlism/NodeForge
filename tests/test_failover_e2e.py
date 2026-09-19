@@ -98,6 +98,10 @@ async def test_real_service_failover_between_nodes(
             node_b.start()
         )
 
+        # -----------------------------------------------------
+        # Wait for both nodes to become ready.
+        # -----------------------------------------------------
+
         assert await wait_for_condition(
             lambda: (
                 node_a.get_state()
@@ -128,11 +132,19 @@ async def test_real_service_failover_between_nodes(
             )
         )
 
+        # -----------------------------------------------------
+        # Create persistent desired state.
+        # -----------------------------------------------------
+
         controller.create_service_intent(
             service_id=service_id,
             command=command,
             desired_state=DesiredState.RUNNING,
         )
+
+        # -----------------------------------------------------
+        # Start service on Node A.
+        # -----------------------------------------------------
 
         started = await controller.start_service(
             node_id="d68-node-a",
@@ -162,6 +174,10 @@ async def test_real_service_failover_between_nodes(
         assert service.node_id == "d68-node-a"
         assert service.status == "running"
 
+        # -----------------------------------------------------
+        # Verify reservation is on Node A.
+        # -----------------------------------------------------
+
         reservation = (
             controller.resource_accounting
             .get(service_id)
@@ -187,7 +203,10 @@ async def test_real_service_failover_between_nodes(
 
         node_a_task = None
 
+        # -----------------------------------------------------
         # Controller must detect Node A as offline.
+        # -----------------------------------------------------
+
         assert await wait_for_condition(
             lambda: (
                 controller.registry.get_node(
@@ -202,7 +221,10 @@ async def test_real_service_failover_between_nodes(
             timeout=5.0,
         )
 
+        # -----------------------------------------------------
         # Node B must remain online.
+        # -----------------------------------------------------
+
         assert (
             controller.registry.get_node(
                 "d68-node-b"
@@ -211,29 +233,26 @@ async def test_real_service_failover_between_nodes(
         )
 
         # -----------------------------------------------------
-        # Execute the real Controller-level failover path.
+        # IMPORTANT:
+        # Do NOT call controller.migrate_service().
+        #
+        # The Controller's offline detection loop must
+        # automatically recover the service.
         # -----------------------------------------------------
 
-        migrated = await controller.migrate_service(
-            service_id=service_id,
-            failed_node_id="d68-node-a",
-        )
-
-        assert migrated is not None
-
-        assert (
-            migrated.payload["status"]
-            == "migrated"
-        )
-
-        assert (
-            migrated.payload["source_node_id"]
-            == "d68-node-a"
-        )
-
-        assert (
-            migrated.payload["target_node_id"]
-            == "d68-node-b"
+        assert await wait_for_condition(
+            lambda: (
+                controller.service_registry
+                .get_service(service_id)
+                is not None
+                and controller.service_registry
+                .get_service(service_id).status
+                == "running"
+                and controller.service_registry
+                .get_service(service_id).node_id
+                == "d68-node-b"
+            ),
+            timeout=10.0,
         )
 
         # -----------------------------------------------------
@@ -270,7 +289,8 @@ async def test_real_service_failover_between_nodes(
                 node_b._service_manager
                 .get_service(service_id)
                 is not None
-            )
+            ),
+            timeout=10.0,
         )
 
         recovered = await controller.status_service(
@@ -292,6 +312,7 @@ async def test_real_service_failover_between_nodes(
         )
 
         assert intent is not None
+
         assert (
             intent.desired_state
             == DesiredState.RUNNING
