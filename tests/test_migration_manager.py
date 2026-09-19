@@ -236,3 +236,216 @@ async def test_duplicate_migration_is_rejected():
     assert result.status == (
         "already_migrating"
     )
+
+
+@pytest.mark.asyncio
+async def test_migration_pre_commit_fences_source_before_commit():
+    manager = MigrationManager()
+
+    manager.reserve_service(
+        "service-1",
+        "node-a",
+        make_plan().requirements,
+    )
+
+    calls = []
+
+    async def start_service(
+        node_id,
+        service_id,
+        command,
+        requirements,
+    ):
+        calls.append(
+            (
+                "start",
+                node_id,
+                service_id,
+            )
+        )
+
+        return FakeResponse(
+            status="started",
+            pid=8888,
+        )
+
+    async def verify_service(
+        node_id,
+        service_id,
+    ):
+        calls.append(
+            (
+                "verify",
+                node_id,
+                service_id,
+            )
+        )
+
+        return True
+
+    async def pre_commit(
+        node_id,
+        service_id,
+    ):
+        calls.append(
+            (
+                "pre_commit",
+                node_id,
+                service_id,
+            )
+        )
+
+    result = await manager.execute(
+        make_plan(),
+        start_service,
+        verify_service,
+        pre_commit=pre_commit,
+    )
+
+    assert result.status == "migrated"
+
+    assert calls == [
+        (
+            "start",
+            "node-b",
+            "service-1",
+        ),
+        (
+            "verify",
+            "node-b",
+            "service-1",
+        ),
+        (
+            "pre_commit",
+            "node-a",
+            "service-1",
+        ),
+    ]
+
+    reservation = manager.accounting.get(
+        "service-1"
+    )
+
+    assert reservation is not None
+    assert reservation.node_id == "node-b"
+
+
+@pytest.mark.asyncio
+async def test_migration_pre_commit_failure_rolls_back_target():
+    manager = MigrationManager()
+
+    manager.reserve_service(
+        "service-1",
+        "node-a",
+        make_plan().requirements,
+    )
+
+    calls = []
+
+    async def start_service(
+        node_id,
+        service_id,
+        command,
+        requirements,
+    ):
+        calls.append(
+            (
+                "start",
+                node_id,
+                service_id,
+            )
+        )
+
+        return FakeResponse(
+            status="started",
+            pid=9999,
+        )
+
+    async def verify_service(
+        node_id,
+        service_id,
+    ):
+        calls.append(
+            (
+                "verify",
+                node_id,
+                service_id,
+            )
+        )
+
+        return True
+
+    async def pre_commit(
+        node_id,
+        service_id,
+    ):
+        calls.append(
+            (
+                "pre_commit",
+                node_id,
+                service_id,
+            )
+        )
+
+        raise RuntimeError(
+            "source could not be stopped"
+        )
+
+    async def stop_service(
+        node_id,
+        service_id,
+    ):
+        calls.append(
+            (
+                "rollback_stop",
+                node_id,
+                service_id,
+            )
+        )
+
+        manager.release_service(
+            service_id
+        )
+
+    result = await manager.execute(
+        make_plan(),
+        start_service,
+        verify_service,
+        stop_service=stop_service,
+        pre_commit=pre_commit,
+    )
+
+    assert result.status == "failed"
+    assert result.error == (
+        "source could not be stopped"
+    )
+
+    assert calls == [
+        (
+            "start",
+            "node-b",
+            "service-1",
+        ),
+        (
+            "verify",
+            "node-b",
+            "service-1",
+        ),
+        (
+            "pre_commit",
+            "node-a",
+            "service-1",
+        ),
+        (
+            "rollback_stop",
+            "node-b",
+            "service-1",
+        ),
+    ]
+
+    reservation = manager.accounting.get(
+        "service-1"
+    )
+
+    assert reservation is not None
+    assert reservation.node_id == "node-a"
