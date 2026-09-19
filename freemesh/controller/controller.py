@@ -145,8 +145,6 @@ class Controller:
 
         self.migration_registry = MigrationRegistry()
 
-        # IMPORTANT:
-        #
         # Only one migration transaction may modify resource
         # accounting at a time.
         #
@@ -596,14 +594,21 @@ class Controller:
                             node_id
                         )
 
-                        try:
-                            await self._recover_services_from_node(
-                                node_id
-                            )
-                        except Exception:
-                            # Recovery failure must never prevent
-                            # socket cleanup.
-                            pass
+                        # Do not start recovery while the
+                        # controller itself is shutting down.
+                        #
+                        # Controller.stop() intentionally closes
+                        # all node connections. Those disconnects
+                        # must not be interpreted as node failures.
+                        if self._running:
+                            try:
+                                await self._recover_services_from_node(
+                                    node_id
+                                )
+                            except Exception:
+                                # Recovery failure must never prevent
+                                # socket cleanup.
+                                pass
 
                     else:
                         # Registration/authentication failed or
@@ -1733,8 +1738,6 @@ class Controller:
         )
 
         if plan is None:
-            # IMPORTANT:
-            #
             # Do NOT release the original reservation here.
             #
             # The migration has not succeeded. Releasing it at
@@ -1788,7 +1791,7 @@ class Controller:
             node_id,
             service_id,
         ):
-            """Verify the target runtime without registry mutation."""
+            """Verify target runtime without registry mutation."""
 
             try:
                 response = await self.status_service(
@@ -1824,19 +1827,45 @@ class Controller:
             node_id,
             service_id,
         ):
-            """Stop the target runtime during rollback."""
+            """Stop target runtime during rollback.
+
+            Registry and resource accounting must remain untouched
+            because MigrationManager owns the transaction.
+            """
 
             return await self.stop_service(
                 node_id=node_id,
                 service_id=service_id,
                 timeout_seconds=timeout_seconds,
+                release_resources=False,
+                update_registry=False,
             )
 
         async def stop_source_before_commit(
             node_id,
             service_id,
         ):
-            """Fence the source runtime before commit."""
+            """Fence source runtime before migration commit."""
+
+            # The source node may already be disconnected.
+            #
+            # In that case the source runtime is considered fenced
+            # from the Controller's perspective. Trying to send a
+            # SERVICE_STOP request would incorrectly abort migration
+            # with "Node is not connected".
+            if node_id not in self._active_nodes:
+                return BaseMessage(
+                    type=(
+                        MessageType.SERVICE_STOP_RESPONSE
+                    ),
+                    message_id=str(uuid.uuid4()),
+                    payload={
+                        "status": "stopped",
+                        "service_id": service_id,
+                        "node_id": node_id,
+                        "request_id": str(uuid.uuid4()),
+                    },
+                )
 
             response = await self.stop_service(
                 node_id=node_id,
@@ -1861,6 +1890,7 @@ class Controller:
             ) not in {
                 "stopped",
                 "success",
+                "not_found",
             }:
                 raise RuntimeError(
                     "Source service could not be stopped "
@@ -1975,6 +2005,11 @@ class Controller:
         )
 
         # Restore the original reservation only when necessary.
+        #
+        # If the source was already offline, _recover_services_from_node
+        # releases its dead-node reservation before entering migration.
+        # In that case original_reservation is None and we must NOT
+        # recreate a reservation on the failed node.
         if original_reservation is not None:
             current_reservation = (
                 self.resource_accounting.get(
@@ -2128,6 +2163,7 @@ class Controller:
             if response_status in {
                 "stopped",
                 "success",
+                "not_found",
             }:
                 if release_resources:
                     self.resource_accounting.release(
@@ -2415,6 +2451,16 @@ class Controller:
                 }:
                     continue
 
+                # The node is already offline, so its resource
+                # reservation cannot remain attached to it while
+                # failover is being planned.
+                #
+                # MigrationManager will create a new target
+                # reservation transactionally.
+                self.resource_accounting.release(
+                    service.service_id
+                )
+
                 await self.migrate_service(
                     service_id=service.service_id,
                     failed_node_id=node_id,
@@ -2531,11 +2577,15 @@ class Controller:
                             "crashed",
                             "failed",
                             "not_found",
+                            "stopped",
                         }:
                             failure_status = (
                                 "crashed"
                                 if runtime_status
-                                == "not_found"
+                                in {
+                                    "not_found",
+                                    "stopped",
+                                }
                                 else runtime_status
                             )
 
@@ -2619,6 +2669,9 @@ class Controller:
                     self.resource_registry.remove_resources(
                         node_id
                     )
+
+                    if not self._running:
+                        break
 
                     await self._recover_services_from_node(
                         node_id
