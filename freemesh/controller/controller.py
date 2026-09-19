@@ -1393,8 +1393,16 @@ class Controller:
             ServiceRequirements
         ] = None,
         timeout_seconds: float = 10.0,
+        reserve_resources: bool = True,
     ) -> BaseMessage:
-        """Request a node to start a service."""
+        """Request a node to start a service.
+
+        ``reserve_resources`` is normally True.
+
+        During migration it is set to False so the target service
+        can be started and verified before ResourceAccounting is
+        changed. MigrationManager owns the reservation transaction.
+        """
 
         transport = self._active_nodes.get(
             node_id
@@ -1483,26 +1491,31 @@ class Controller:
                     requirements=requirements,
                 )
 
-                existing_reservation = (
-                    self.resource_accounting.get(
-                        service_id
+                # Normal service starts reserve resources
+                # immediately. Migration starts are different:
+                # MigrationManager reserves only after target
+                # startup and verification succeed.
+                if reserve_resources:
+                    existing_reservation = (
+                        self.resource_accounting.get(
+                            service_id
+                        )
                     )
-                )
 
-                if existing_reservation is None:
-                    self.migration_manager.reserve_service(
-                        service_id=service_id,
-                        node_id=node_id,
-                        requirements=requirements,
-                    )
-                elif (
-                    existing_reservation.node_id
-                    != node_id
-                ):
-                    self.migration_manager.migrate_reservation(
-                        service_id=service_id,
-                        target_node_id=node_id,
-                    )
+                    if existing_reservation is None:
+                        self.migration_manager.reserve_service(
+                            service_id=service_id,
+                            node_id=node_id,
+                            requirements=requirements,
+                        )
+                    elif (
+                        existing_reservation.node_id
+                        != node_id
+                    ):
+                        self.migration_manager.migrate_reservation(
+                            service_id=service_id,
+                            target_node_id=node_id,
+                        )
 
             return response
 
@@ -1577,8 +1590,39 @@ class Controller:
             )
         )
 
+        # No target has enough capacity.
+        #
+        # The old reservation belongs to the failed node and must
+        # not remain in ResourceAccounting, otherwise the failed
+        # node continues to consume a reservation forever and the
+        # service is incorrectly counted as allocated there.
+        #
+        # We intentionally keep the desired state unchanged.
+        # Reconciliation can retry the migration later when a
+        # suitable node becomes available.
         if plan is None:
-            return None
+            self.resource_accounting.release(
+                service_id
+            )
+
+            return BaseMessage(
+                type=(
+                    MessageType.SERVICE_START_RESPONSE
+                ),
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "status": "capacity_unavailable",
+                    "service_id": service_id,
+                    "source_node_id": (
+                        failed_node_id
+                    ),
+                    "target_node_id": None,
+                    "error": (
+                        "No available node has enough "
+                        "resources for migration"
+                    ),
+                },
+            )
 
         self.migration_registry.start(
             service_id=plan.service_id,
@@ -1592,12 +1636,16 @@ class Controller:
             command,
             requirements,
         ):
+            # Do not reserve target resources yet.
+            # MigrationManager performs reservation only after
+            # the target service has started and been verified.
             return await self.start_service(
                 node_id=node_id,
                 service_id=service_id,
                 command=command,
                 requirements=requirements,
                 timeout_seconds=timeout_seconds,
+                reserve_resources=False,
             )
 
         async def verify_target(
