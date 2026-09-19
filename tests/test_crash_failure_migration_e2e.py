@@ -220,28 +220,21 @@ async def test_crash_failure_triggers_automatic_migration():
             assert initial_pid is not None
 
             # -------------------------------------------------
-            # Wait for RestartEngine exhaustion.
+            # Wait for Controller to receive SERVICE_FAILURE.
             #
-            # restart_attempts lives on NodeAgent's Service
-            # model, not Controller's ServiceInfo.
+            # This is the externally observable result of
+            # restart exhaustion. It is more robust than
+            # waiting only on NodeAgent's internal timing.
             # -------------------------------------------------
 
             await wait_until(
                 lambda: (
-                    (
-                        node_a._service_manager.get_service(
-                            "crash-migration-service"
-                        )
-                        is not None
+                    controller.failure_manager.get_failure(
+                        "crash-migration-service"
                     )
-                    and (
-                        node_a._service_manager.get_service(
-                            "crash-migration-service"
-                        ).restart_attempts
-                        >= 3
-                    )
+                    is not None
                 ),
-                timeout=15.0,
+                timeout=20.0,
             )
 
             node_a_service = (
@@ -265,16 +258,6 @@ async def test_crash_failure_triggers_automatic_migration():
             # -------------------------------------------------
             # Verify Controller received SERVICE_FAILURE.
             # -------------------------------------------------
-
-            await wait_until(
-                lambda: (
-                    controller.failure_manager.get_failure(
-                        "crash-migration-service"
-                    )
-                    is not None
-                ),
-                timeout=10.0,
-            )
 
             failure = (
                 controller.failure_manager.get_failure(
