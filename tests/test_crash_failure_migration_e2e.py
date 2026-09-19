@@ -38,6 +38,174 @@ async def wait_until(
     )
 
 
+def print_migration_diagnostic(
+    controller: Controller,
+    service_id: str,
+    node_a: NodeAgent | None,
+    node_b: NodeAgent | None,
+) -> None:
+    """Print detailed migration state after a timeout."""
+
+    print("\n")
+    print("=" * 72)
+    print("NODEFORGE MIGRATION DIAGNOSTIC")
+    print("=" * 72)
+
+    migration = controller.migration_registry.get(
+        service_id
+    )
+
+    if migration is None:
+        print("Migration record: NONE")
+    else:
+        print("Migration record:")
+        print(
+            f"  status       = {migration.status}"
+        )
+        print(
+            f"  source_node  = {migration.source_node_id}"
+        )
+        print(
+            f"  target_node  = {migration.target_node_id}"
+        )
+        print(
+            f"  pid          = {migration.pid}"
+        )
+        print(
+            f"  error        = {migration.error!r}"
+        )
+
+    service = (
+        controller.service_registry.get_service(
+            service_id
+        )
+    )
+
+    if service is None:
+        print("Canonical service: NONE")
+    else:
+        print("Canonical service:")
+        print(
+            f"  node_id      = {service.node_id}"
+        )
+        print(
+            f"  status       = {service.status}"
+        )
+        print(
+            f"  pid          = {service.pid}"
+        )
+        print(
+            f"  restart      = {service.restart_attempts}"
+        )
+
+    failure = (
+        controller.failure_manager.get_failure(
+            service_id
+        )
+    )
+
+    if failure is None:
+        print("Failure record: NONE")
+    else:
+        print("Failure record:")
+        print(
+            f"  node_id      = {failure.node_id}"
+        )
+        print(
+            f"  status       = {failure.status}"
+        )
+        print(
+            f"  restart      = {failure.restart_attempts}"
+        )
+        print(
+            f"  reason       = {failure.reason!r}"
+        )
+
+    reservation = (
+        controller.resource_accounting.get(
+            service_id
+        )
+    )
+
+    if reservation is None:
+        print("Resource reservation: NONE")
+    else:
+        print("Resource reservation:")
+        print(
+            f"  node_id      = {reservation.node_id}"
+        )
+
+    for label, node in (
+        ("Node A", node_a),
+        ("Node B", node_b),
+    ):
+        if node is None:
+            print(f"{label}: NONE")
+            continue
+
+        print(f"{label}:")
+        print(
+            f"  state        = {node.get_state()}"
+        )
+
+        try:
+            node_service = (
+                node._service_manager.get_service(
+                    service_id
+                )
+            )
+        except Exception as exc:
+            print(
+                f"  service read = ERROR: {exc!r}"
+            )
+            continue
+
+        if node_service is None:
+            print("  service      = NONE")
+        else:
+            print(
+                f"  service.node = {node_service.node_id}"
+            )
+            print(
+                f"  service.stat = {node_service.status}"
+            )
+            print(
+                f"  service.pid  = {node_service.pid}"
+            )
+            print(
+                f"  restart      = "
+                f"{node_service.restart_attempts}"
+            )
+
+            try:
+                process = (
+                    node._service_manager.get_process(
+                        service_id
+                    )
+                )
+            except Exception as exc:
+                print(
+                    f"  process read = ERROR: {exc!r}"
+                )
+                process = None
+
+            if process is None:
+                print("  process      = NONE")
+            else:
+                print(
+                    f"  process.pid  = {process.pid}"
+                )
+                print(
+                    f"  returncode   = "
+                    f"{process.returncode}"
+                )
+
+    print("=" * 72)
+    print("END MIGRATION DIAGNOSTIC")
+    print("=" * 72)
+    print()
+
+
 @pytest.mark.asyncio
 async def test_crash_failure_triggers_automatic_migration():
     """A crashing service should migrate after restart exhaustion."""
@@ -68,10 +236,6 @@ async def test_crash_failure_triggers_automatic_migration():
     counter_file.close()
 
     try:
-        # -------------------------------------------------
-        # Controller
-        # -------------------------------------------------
-
         await wait_until(
             lambda: (
                 controller.server is not None
@@ -84,10 +248,6 @@ async def test_crash_failure_triggers_automatic_migration():
             controller.server.sockets[0]
             .getsockname()[1]
         )
-
-        # -------------------------------------------------
-        # Nodes
-        # -------------------------------------------------
 
         node_a = NodeAgent(
             node_id="crash-node-a",
@@ -154,20 +314,6 @@ async def test_crash_failure_triggers_automatic_migration():
                 timeout=5.0,
             )
 
-            # -------------------------------------------------
-            # The command:
-            #
-            # 1 -> crash
-            # 2 -> crash
-            # 3 -> crash
-            # 4 -> crash
-            # 5 -> stay alive
-            #
-            # Thus:
-            # initial start + 3 restart attempts = 4 failures
-            # migration to Node B = successful 5th execution
-            # -------------------------------------------------
-
             command = (
                 "count_file="
                 + counter_path
@@ -187,10 +333,6 @@ async def test_crash_failure_triggers_automatic_migration():
                 "sleep 30; "
                 "fi"
             )
-
-            # -------------------------------------------------
-            # Start on Node A
-            # -------------------------------------------------
 
             response = await controller.start_service(
                 node_id="crash-node-a",
@@ -220,16 +362,6 @@ async def test_crash_failure_triggers_automatic_migration():
             initial_pid = service.pid
 
             assert initial_pid is not None
-
-            # -------------------------------------------------
-            # Wait for Controller to receive the final
-            # SERVICE_FAILURE from Node A.
-            #
-            # Do NOT inspect Node A's ServiceManager here.
-            # Automatic migration may already have removed
-            # the source service by the time this condition
-            # becomes visible.
-            # -------------------------------------------------
 
             await wait_until(
                 lambda: (
@@ -264,37 +396,47 @@ async def test_crash_failure_triggers_automatic_migration():
                 == 3
             )
 
-            # -------------------------------------------------
-            # Wait for automatic migration.
-            # -------------------------------------------------
-
-            await wait_until(
-                lambda: (
-                    (
-                        controller.service_registry.get_service(
-                            "crash-migration-service"
-                        )
-                        is not None
-                    )
-                    and (
-                        controller.service_registry.get_service(
-                            "crash-migration-service"
-                        ).node_id
-                        == "migration-node-b"
-                    )
-                    and (
-                        controller.service_registry.get_service(
-                            "crash-migration-service"
-                        ).status
-                        == "running"
-                    )
-                ),
-                timeout=30.0,
+            service_id = (
+                "crash-migration-service"
             )
+
+            try:
+                await wait_until(
+                    lambda: (
+                        (
+                            controller.service_registry.get_service(
+                                service_id
+                            )
+                            is not None
+                        )
+                        and (
+                            controller.service_registry.get_service(
+                                service_id
+                            ).node_id
+                            == "migration-node-b"
+                        )
+                        and (
+                            controller.service_registry.get_service(
+                                service_id
+                            ).status
+                            == "running"
+                        )
+                    ),
+                    timeout=30.0,
+                )
+
+            except AssertionError:
+                print_migration_diagnostic(
+                    controller=controller,
+                    service_id=service_id,
+                    node_a=node_a,
+                    node_b=node_b,
+                )
+                raise
 
             migrated_service = (
                 controller.service_registry.get_service(
-                    "crash-migration-service"
+                    service_id
                 )
             )
 
@@ -317,13 +459,9 @@ async def test_crash_failure_triggers_automatic_migration():
                 != initial_pid
             )
 
-            # -------------------------------------------------
-            # Migration registry
-            # -------------------------------------------------
-
             migration = (
                 controller.migration_registry.get(
-                    "crash-migration-service"
+                    service_id
                 )
             )
 
@@ -344,13 +482,9 @@ async def test_crash_failure_triggers_automatic_migration():
                 == "migration-node-b"
             )
 
-            # -------------------------------------------------
-            # Resource accounting
-            # -------------------------------------------------
-
             reservation = (
                 controller.resource_accounting.get(
-                    "crash-migration-service"
+                    service_id
                 )
             )
 
@@ -361,13 +495,9 @@ async def test_crash_failure_triggers_automatic_migration():
                 == "migration-node-b"
             )
 
-            # -------------------------------------------------
-            # Verify actual Node B service
-            # -------------------------------------------------
-
             node_b_service = (
                 node_b._service_manager.get_service(
-                    "crash-migration-service"
+                    service_id
                 )
             )
 
@@ -383,13 +513,9 @@ async def test_crash_failure_triggers_automatic_migration():
                 == migrated_service.pid
             )
 
-            # -------------------------------------------------
-            # Verify actual OS process on Node B
-            # -------------------------------------------------
-
             node_b_process = (
                 node_b._service_manager.get_process(
-                    "crash-migration-service"
+                    service_id
                 )
             )
 
@@ -399,10 +525,6 @@ async def test_crash_failure_triggers_automatic_migration():
                 node_b_process.returncode
                 is None
             )
-
-            # -------------------------------------------------
-            # Verify command execution count.
-            # -------------------------------------------------
 
             with open(
                 counter_path,
