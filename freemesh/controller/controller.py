@@ -904,9 +904,16 @@ class Controller:
                     message.type
                     == MessageType.SERVICE_FAILURE
                 ):
-                    await self._handle_service_failure(
-                        node_id=node_id,
-                        message=message,
+                    # Service failure recovery may perform
+                    # STATUS/STOP requests back to this same
+                    # node. Run recovery independently so this
+                    # receive loop remains free to consume those
+                    # responses.
+                    asyncio.create_task(
+                        self._handle_service_failure(
+                            node_id=node_id,
+                            message=message,
+                        )
                     )
 
                 elif message.type == MessageType.ERROR:
