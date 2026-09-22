@@ -4,11 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from freemesh.protocol.messages import (
-    BaseMessage,
-    MessageType,
-)
-
 if TYPE_CHECKING:
     from freemesh.controller.controller import Controller
 
@@ -29,7 +24,7 @@ class ServiceHealthManager:
         self,
         service_id: str,
     ):
-        """Check one service and trigger existing recovery logic."""
+        """Check one service and trigger the existing failure path."""
 
         controller = self.controller
 
@@ -53,7 +48,7 @@ class ServiceHealthManager:
         )
 
         # If the service owner has no active transport,
-        # use the existing recovery path.
+        # use the existing failure/recovery path.
         if transport is None:
             return await controller._handle_service_failure(
                 service,
@@ -109,18 +104,12 @@ class ServiceHealthManager:
             "crashed",
             "failed",
         }:
-            failure_message = BaseMessage(
-                type=MessageType.SERVICE_FAILURE,
-                request_id=response.request_id,
-                node_id=node_id,
-                service_id=service_id,
-                payload=payload,
-            )
-
+            # Keep failure recording and recovery in the existing
+            # Controller failure path.
             return await controller._handle_service_failure(
                 service,
                 node_id,
-                failure_message,
+                response,
             )
 
         return status
