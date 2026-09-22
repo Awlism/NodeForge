@@ -1,5 +1,7 @@
 """Persistent node registry for the NodeForge controller."""
 
+from __future__ import annotations
+
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -30,47 +32,83 @@ class NodeInfo:
     connection_port: Optional[int] = None
     authenticated: bool = False
 
-    def is_offline(self, timeout_seconds: float) -> bool:
-        """Check if node is offline based on heartbeat timeout."""
+    def is_offline(
+        self,
+        timeout_seconds: float,
+    ) -> bool:
+        """Check whether heartbeat timeout has elapsed."""
 
-        if self.last_heartbeat_time is None:
-            elapsed = (
-                datetime.now(timezone.utc)
-                - self.registration_time
-            ).total_seconds()
-            return elapsed > timeout_seconds
+        if timeout_seconds <= 0:
+            raise ValueError(
+                "timeout_seconds must be positive"
+            )
+
+        reference_time = (
+            self.last_heartbeat_time
+            or self.registration_time
+        )
 
         elapsed = (
             datetime.now(timezone.utc)
-            - self.last_heartbeat_time
+            - reference_time
         ).total_seconds()
 
         return elapsed > timeout_seconds
 
 
 class NodeRegistry:
-    """Store and manage node state with optional SQLite persistence."""
+    """Store and manage node state with SQLite persistence."""
 
     def __init__(
         self,
         database_path: str = ":memory:",
     ) -> None:
-        """Initialize the node registry."""
-
-        self._nodes: Dict[str, NodeInfo] = {}
+        self._nodes: Dict[
+            str,
+            NodeInfo,
+        ] = {}
 
         self._database_path = database_path
+
         self._connection = sqlite3.connect(
             database_path,
             timeout=30.0,
+            isolation_level=None,
         )
 
-        self._connection.row_factory = sqlite3.Row
+        self._connection.row_factory = (
+            sqlite3.Row
+        )
 
+        self._configure_database()
         self._create_tables()
         self._load_from_store()
 
-    def _create_tables(self) -> None:
+    def _configure_database(
+        self,
+    ) -> None:
+        """Configure SQLite for resilient controller state."""
+
+        self._connection.execute(
+            "PRAGMA busy_timeout = 30000"
+        )
+
+        self._connection.execute(
+            "PRAGMA foreign_keys = ON"
+        )
+
+        if self._database_path != ":memory:":
+            self._connection.execute(
+                "PRAGMA journal_mode = WAL"
+            )
+
+        self._connection.execute(
+            "PRAGMA synchronous = NORMAL"
+        )
+
+    def _create_tables(
+        self,
+    ) -> None:
         """Create the persistent node table."""
 
         self._connection.execute(
@@ -88,14 +126,10 @@ class NodeRegistry:
             """
         )
 
-        self._connection.commit()
-
     @staticmethod
     def _datetime_to_string(
         value: Optional[datetime],
     ) -> Optional[str]:
-        """Convert datetime to ISO-8601 string."""
-
         if value is None:
             return None
 
@@ -105,12 +139,12 @@ class NodeRegistry:
     def _string_to_datetime(
         value: Optional[str],
     ) -> Optional[datetime]:
-        """Convert ISO-8601 string back to datetime."""
-
         if value is None:
             return None
 
-        parsed = datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(
+            value
+        )
 
         if parsed.tzinfo is None:
             parsed = parsed.replace(
@@ -123,9 +157,10 @@ class NodeRegistry:
     def _state_to_string(
         state: NodeState | str,
     ) -> str:
-        """Normalize NodeState or string into a database value."""
-
-        if isinstance(state, NodeState):
+        if isinstance(
+            state,
+            NodeState,
+        ):
             return state.value
 
         return str(state)
@@ -134,22 +169,21 @@ class NodeRegistry:
     def _normalize_state(
         state: NodeState | str,
     ) -> NodeState:
-        """Normalize a state value into NodeState."""
-
-        if isinstance(state, NodeState):
+        if isinstance(
+            state,
+            NodeState,
+        ):
             return state
 
-        return NodeState(str(state))
+        return NodeState(
+            str(state)
+        )
 
     def _persist_node(
         self,
         node_info: NodeInfo,
     ) -> None:
-        """Persist one node."""
-
-        state_value = self._state_to_string(
-            node_info.state
-        )
+        """Persist one node atomically."""
 
         self._connection.execute(
             """
@@ -182,17 +216,21 @@ class NodeRegistry:
                 self._datetime_to_string(
                     node_info.last_heartbeat_time
                 ),
-                state_value,
+                self._state_to_string(
+                    node_info.state
+                ),
                 node_info.connection_address,
                 node_info.connection_port,
-                int(node_info.authenticated),
+                int(
+                    node_info.authenticated
+                ),
             ),
         )
 
-        self._connection.commit()
-
-    def _load_from_store(self) -> None:
-        """Load all persisted nodes into memory."""
+    def _load_from_store(
+        self,
+    ) -> None:
+        """Load persisted nodes."""
 
         rows = self._connection.execute(
             """
@@ -213,11 +251,19 @@ class NodeRegistry:
             node_info = NodeInfo(
                 node_id=row["node_id"],
                 hostname=row["hostname"],
-                registration_time=self._string_to_datetime(
-                    row["registration_time"]
+                registration_time=(
+                    self._string_to_datetime(
+                        row[
+                            "registration_time"
+                        ]
+                    )
                 ),
-                last_heartbeat_time=self._string_to_datetime(
-                    row["last_heartbeat_time"]
+                last_heartbeat_time=(
+                    self._string_to_datetime(
+                        row[
+                            "last_heartbeat_time"
+                        ]
+                    )
                 ),
                 state=self._normalize_state(
                     row["state"]
@@ -233,7 +279,9 @@ class NodeRegistry:
                 ),
             )
 
-            self._nodes[node_info.node_id] = node_info
+            self._nodes[
+                node_info.node_id
+            ] = node_info
 
     def register_node(
         self,
@@ -242,11 +290,59 @@ class NodeRegistry:
         connection_address: Optional[str] = None,
         connection_port: Optional[int] = None,
     ) -> NodeInfo:
-        """Register a new node or refresh an existing node."""
+        """Register a node or refresh an existing node."""
 
-        now = datetime.now(timezone.utc)
+        if (
+            not isinstance(
+                node_id,
+                str,
+            )
+            or not node_id.strip()
+        ):
+            raise ValueError(
+                "node_id is required"
+            )
 
-        existing_node = self._nodes.get(node_id)
+        if (
+            not isinstance(
+                hostname,
+                str,
+            )
+            or not hostname.strip()
+        ):
+            raise ValueError(
+                "hostname is required"
+            )
+
+        if (
+            connection_port is not None
+            and (
+                not isinstance(
+                    connection_port,
+                    int,
+                )
+                or isinstance(
+                    connection_port,
+                    bool,
+                )
+                or not (
+                    1
+                    <= connection_port
+                    <= 65535
+                )
+            )
+        ):
+            raise ValueError(
+                "connection_port must be between 1 and 65535"
+            )
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+        existing_node = self._nodes.get(
+            node_id
+        )
 
         if existing_node is not None:
             existing_node.hostname = hostname
@@ -258,10 +354,14 @@ class NodeRegistry:
             existing_node.connection_port = (
                 connection_port
             )
-            existing_node.state = NodeState.REGISTERING
+            existing_node.state = (
+                NodeState.REGISTERING
+            )
             existing_node.authenticated = False
 
-            self._persist_node(existing_node)
+            self._persist_node(
+                existing_node
+            )
 
             return existing_node
 
@@ -269,14 +369,29 @@ class NodeRegistry:
             node_id=node_id,
             hostname=hostname,
             registration_time=now,
-            connection_address=connection_address,
-            connection_port=connection_port,
+            connection_address=(
+                connection_address
+            ),
+            connection_port=(
+                connection_port
+            ),
             state=NodeState.REGISTERING,
         )
 
-        self._nodes[node_id] = node_info
+        self._nodes[
+            node_id
+        ] = node_info
 
-        self._persist_node(node_info)
+        try:
+            self._persist_node(
+                node_info
+            )
+        except Exception:
+            self._nodes.pop(
+                node_id,
+                None,
+            )
+            raise
 
         return node_info
 
@@ -284,38 +399,45 @@ class NodeRegistry:
         self,
         node_id: str,
     ) -> Optional[NodeInfo]:
-        """Get node information by node ID."""
+        return self._nodes.get(
+            node_id
+        )
 
-        return self._nodes.get(node_id)
-
-    def list_nodes(self) -> List[NodeInfo]:
-        """List all registered nodes."""
-
-        return list(self._nodes.values())
+    def list_nodes(
+        self,
+    ) -> List[NodeInfo]:
+        return list(
+            self._nodes.values()
+        )
 
     def update_node_state(
         self,
         node_id: str,
         state: NodeState | str,
     ) -> NodeInfo:
-        """Update the state of a node.
-
-        Both NodeState values and their string values are accepted
-        for backward compatibility.
-        """
-
         if node_id not in self._nodes:
             raise KeyError(
                 f"Node {node_id} not found in registry"
             )
 
-        node_info = self._nodes[node_id]
-
-        node_info.state = self._normalize_state(
+        normalized = self._normalize_state(
             state
         )
 
-        self._persist_node(node_info)
+        node_info = self._nodes[
+            node_id
+        ]
+
+        previous = node_info.state
+        node_info.state = normalized
+
+        try:
+            self._persist_node(
+                node_info
+            )
+        except Exception:
+            node_info.state = previous
+            raise
 
         return node_info
 
@@ -324,23 +446,49 @@ class NodeRegistry:
         node_id: str,
         authenticated: bool = True,
     ) -> NodeInfo:
-        """Update authentication status of a node."""
-
         if node_id not in self._nodes:
             raise KeyError(
                 f"Node {node_id} not found in registry"
             )
 
-        node_info = self._nodes[node_id]
-        node_info.authenticated = authenticated
+        node_info = self._nodes[
+            node_id
+        ]
+
+        previous_authenticated = (
+            node_info.authenticated
+        )
+        previous_state = node_info.state
+
+        node_info.authenticated = (
+            authenticated
+        )
 
         if authenticated:
-            if node_info.state == NodeState.REGISTERING:
-                node_info.state = NodeState.ONLINE
+            if (
+                node_info.state
+                == NodeState.REGISTERING
+            ):
+                node_info.state = (
+                    NodeState.ONLINE
+                )
         else:
-            node_info.state = NodeState.AUTH_FAILED
+            node_info.state = (
+                NodeState.AUTH_FAILED
+            )
 
-        self._persist_node(node_info)
+        try:
+            self._persist_node(
+                node_info
+            )
+        except Exception:
+            node_info.authenticated = (
+                previous_authenticated
+            )
+            node_info.state = (
+                previous_state
+            )
+            raise
 
         return node_info
 
@@ -348,23 +496,44 @@ class NodeRegistry:
         self,
         node_id: str,
     ) -> NodeInfo:
-        """Record a heartbeat from a node."""
-
         if node_id not in self._nodes:
             raise KeyError(
                 f"Node {node_id} not found in registry"
             )
 
-        node_info = self._nodes[node_id]
+        node_info = self._nodes[
+            node_id
+        ]
+
+        previous_time = (
+            node_info.last_heartbeat_time
+        )
+        previous_state = node_info.state
 
         node_info.last_heartbeat_time = (
             datetime.now(timezone.utc)
         )
 
-        if node_info.state == NodeState.OFFLINE:
-            node_info.state = NodeState.ONLINE
+        if (
+            node_info.state
+            == NodeState.OFFLINE
+        ):
+            node_info.state = (
+                NodeState.ONLINE
+            )
 
-        self._persist_node(node_info)
+        try:
+            self._persist_node(
+                node_info
+            )
+        except Exception:
+            node_info.last_heartbeat_time = (
+                previous_time
+            )
+            node_info.state = (
+                previous_state
+            )
+            raise
 
         return node_info
 
@@ -372,36 +541,46 @@ class NodeRegistry:
         self,
         timeout_seconds: float,
     ) -> List[NodeInfo]:
-        """Detect nodes that have not sent heartbeats."""
+        if timeout_seconds <= 0:
+            raise ValueError(
+                "timeout_seconds must be positive"
+            )
 
-        offline_nodes = []
-
-        for node_info in self._nodes.values():
+        return [
+            node_info
+            for node_info in self._nodes.values()
             if (
-                node_info.state != NodeState.OFFLINE
+                node_info.state
+                != NodeState.OFFLINE
                 and node_info.is_offline(
                     timeout_seconds
                 )
-            ):
-                offline_nodes.append(node_info)
-
-        return offline_nodes
+            )
+        ]
 
     def mark_offline(
         self,
         node_id: str,
     ) -> NodeInfo:
-        """Mark a node as offline."""
-
         if node_id not in self._nodes:
             raise KeyError(
                 f"Node {node_id} not found in registry"
             )
 
-        node_info = self._nodes[node_id]
+        node_info = self._nodes[
+            node_id
+        ]
+
+        previous = node_info.state
         node_info.state = NodeState.OFFLINE
 
-        self._persist_node(node_info)
+        try:
+            self._persist_node(
+                node_info
+            )
+        except Exception:
+            node_info.state = previous
+            raise
 
         return node_info
 
@@ -409,43 +588,45 @@ class NodeRegistry:
         self,
         node_id: str,
     ) -> Optional[NodeInfo]:
-        """Unregister a node from the registry."""
+        node_info = self._nodes.get(
+            node_id
+        )
 
-        node_info = self._nodes.pop(
+        if node_info is None:
+            return None
+
+        self._connection.execute(
+            """
+            DELETE FROM node_registry
+            WHERE node_id = ?
+            """,
+            (node_id,),
+        )
+
+        self._nodes.pop(
             node_id,
             None,
         )
 
-        if node_info is not None:
-            self._connection.execute(
-                """
-                DELETE FROM node_registry
-                WHERE node_id = ?
-                """,
-                (node_id,),
-            )
-
-            self._connection.commit()
-
         return node_info
 
-    def clear(self) -> None:
-        """Clear all nodes from memory and persistent storage."""
-
-        self._nodes.clear()
-
+    def clear(
+        self,
+    ) -> None:
         self._connection.execute(
             "DELETE FROM node_registry"
         )
 
-        self._connection.commit()
+        self._nodes.clear()
 
-    def node_count(self) -> int:
-        """Get the total number of registered nodes."""
+    def node_count(
+        self,
+    ) -> int:
+        return len(
+            self._nodes
+        )
 
-        return len(self._nodes)
-
-    def close(self) -> None:
-        """Close the SQLite connection."""
-
+    def close(
+        self,
+    ) -> None:
         self._connection.close()
