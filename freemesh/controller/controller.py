@@ -19,12 +19,6 @@ from freemesh.controller.node_registry import (
 from freemesh.controller.reconciler import (
     Reconciler,
 )
-from freemesh.controller.service_orchestrator import (
-    ServiceOrchestrator,
-)
-from freemesh.controller.service_lifecycle import (
-    ServiceLifecycleManager,
-)
 from freemesh.controller.resource_accounting import (
     ResourceAccounting,
 )
@@ -33,6 +27,12 @@ from freemesh.controller.resource_failover import (
 )
 from freemesh.controller.resource_registry import (
     ResourceRegistry,
+)
+from freemesh.controller.service_commands import (
+    ServiceCommandLayer,
+)
+from freemesh.controller.service_health import (
+    ServiceHealthManager,
 )
 from freemesh.controller.service_intent import (
     DesiredState,
@@ -44,11 +44,20 @@ from freemesh.controller.service_intent_registry import (
 from freemesh.controller.service_intent_store import (
     ServiceIntentStore,
 )
+from freemesh.controller.service_lifecycle import (
+    ServiceLifecycleManager,
+)
 from freemesh.controller.service_metadata_store import (
     ServiceMetadataStore,
 )
+from freemesh.controller.service_orchestrator import (
+    ServiceOrchestrator,
+)
 from freemesh.controller.service_placement import (
     ServicePlacement,
+)
+from freemesh.controller.service_recovery import (
+    ServiceRecoveryCoordinator,
 )
 from freemesh.controller.service_registry import (
     ServiceRegistry,
@@ -126,6 +135,10 @@ class Controller:
             self.service_intent_registry
         )
 
+        # =====================================================
+        # SERVICE ORCHESTRATION LAYERS
+        # =====================================================
+
         self.service_orchestrator = ServiceOrchestrator(
             self
         )
@@ -133,6 +146,22 @@ class Controller:
         self.service_lifecycle = ServiceLifecycleManager(
             self.service_orchestrator
         )
+
+        self.service_recovery = ServiceRecoveryCoordinator(
+            self.service_orchestrator
+        )
+
+        self.service_health = ServiceHealthManager(
+            self
+        )
+
+        self.service_commands = ServiceCommandLayer(
+            self
+        )
+
+        # =====================================================
+        # FAILURE / RESOURCE / MIGRATION COMPONENTS
+        # =====================================================
 
         self.failure_manager = FailureManager()
 
@@ -2380,6 +2409,31 @@ class Controller:
             )
 
     # =========================================================
+    # SERVICE FAILURE MESSAGE
+    # =========================================================
+
+    def _build_service_failure_message(
+        self,
+        service,
+        status: str,
+        error: str,
+        restart_attempts: int = 0,
+    ) -> BaseMessage:
+        """Build a standard service failure message."""
+
+        return BaseMessage(
+            type=MessageType.SERVICE_FAILURE,
+            message_id=str(uuid.uuid4()),
+            payload={
+                "service_id": service.service_id,
+                "node_id": service.node_id,
+                "status": status,
+                "error": error,
+                "restart_attempts": restart_attempts,
+            },
+        )
+
+    # =========================================================
     # FAILURE / RECOVERY
     # =========================================================
 
@@ -2442,9 +2496,9 @@ class Controller:
         )
 
         try:
-            await self.migrate_service(
+            await self.service_recovery.recover_failed_service(
                 service_id=service.service_id,
-                failed_node_id=node_id,
+                node_id=node_id,
             )
 
         except (
@@ -2464,39 +2518,9 @@ class Controller:
     ) -> None:
         """Automatically recover services from an offline node."""
 
-        services = (
-            self.service_registry.list_node_services(
-                node_id
-            )
+        await self.service_recovery.recover_from_node(
+            node_id
         )
-
-        for service in services:
-            try:
-                if service.status in {
-                    "stopped",
-                    "failed",
-                }:
-                    continue
-
-                self.resource_accounting.release(
-                    service.service_id
-                )
-
-                await self.migrate_service(
-                    service_id=service.service_id,
-                    failed_node_id=node_id,
-                )
-
-            except (
-                RuntimeError,
-                TimeoutError,
-                KeyError,
-                ValueError,
-            ):
-                continue
-
-            except Exception:
-                continue
 
     # =========================================================
     # BACKGROUND MONITORS
@@ -2527,7 +2551,7 @@ class Controller:
     async def _run_service_health_monitor(
         self,
     ) -> None:
-        """Monitor registered services and trigger recovery."""
+        """Monitor service health and trigger self-healing."""
 
         while self._running:
             try:
@@ -2538,129 +2562,7 @@ class Controller:
                 if not self._running:
                     break
 
-                services = (
-                    self.service_registry.list_services()
-                )
-
-                for service in services:
-                    try:
-                        if service.status in {
-                            "stopped",
-                            "failed",
-                        }:
-                            continue
-
-                        node_transport = (
-                            self._active_nodes.get(
-                                service.node_id
-                            )
-                        )
-
-                        if node_transport is None:
-                            await self.migrate_service(
-                                service_id=(
-                                    service.service_id
-                                ),
-                                failed_node_id=(
-                                    service.node_id
-                                ),
-                            )
-
-                            continue
-
-                        response = (
-                            await self.status_service(
-                                node_id=service.node_id,
-                                service_id=(
-                                    service.service_id
-                                ),
-                                update_registry=False,
-                            )
-                        )
-
-                        payload = response.payload
-
-                        if not isinstance(
-                            payload,
-                            dict,
-                        ):
-                            continue
-
-                        runtime_status = payload.get(
-                            "status"
-                        )
-
-                        if runtime_status in {
-                            "not_found",
-                            "stopped",
-                        }:
-                            current_service = (
-                                self.service_registry.get_service(
-                                    service.service_id
-                                )
-                            )
-
-                            if (
-                                current_service is not None
-                                and current_service.node_id
-                                == service.node_id
-                            ):
-                                self.service_registry.update_service(
-                                    service_id=(
-                                        service.service_id
-                                    ),
-                                    status="stopped",
-                                    pid=None,
-                                )
-
-                            continue
-
-                        if runtime_status in {
-                            "crashed",
-                            "failed",
-                        }:
-                            failure_message = BaseMessage(
-                                type=(
-                                    MessageType.SERVICE_FAILURE
-                                ),
-                                message_id=str(
-                                    uuid.uuid4()
-                                ),
-                                payload={
-                                    "service_id": (
-                                        service.service_id
-                                    ),
-                                    "node_id": (
-                                        service.node_id
-                                    ),
-                                    "status": (
-                                        runtime_status
-                                    ),
-                                    "error": (
-                                        "Health monitor "
-                                        "detected runtime "
-                                        f"status: "
-                                        f"{runtime_status}"
-                                    ),
-                                    "restart_attempts": 0,
-                                },
-                            )
-
-                            await self._handle_service_failure(
-                                node_id=service.node_id,
-                                message=failure_message,
-                            )
-
-                    except (
-                        RuntimeError,
-                        TimeoutError,
-                        KeyError,
-                        ValueError,
-                    ):
-                        continue
-
-                    except Exception:
-                        continue
+                await self.service_health.monitor_once()
 
             except asyncio.CancelledError:
                 break
