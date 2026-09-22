@@ -1903,15 +1903,6 @@ class Controller:
 
                 return False
 
-            # -----------------------------------------------------
-            # Fast path:
-            #
-            # The source may already have crashed before the
-            # migration transaction reached the fencing phase.
-            # -----------------------------------------------------
-            if await source_is_fenced():
-                return make_fenced_response()
-
             last_response = None
             last_error = None
 
