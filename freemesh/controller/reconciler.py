@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+
 from freemesh.controller.service_intent import (
     DesiredState,
     ServiceIntent,
@@ -81,8 +82,6 @@ class Reconciler:
         stop_service,
         migrate_service,
     ) -> ReconciliationResult:
-        """Reconcile one service against desired state."""
-
         intent = self.intent_registry.get(
             service_id
         )
@@ -130,8 +129,6 @@ class Reconciler:
         start_service,
         migrate_service,
     ) -> ReconciliationResult:
-        """Ensure a RUNNING-intent service is running."""
-
         if actual_service is None:
             if not intent.command:
                 return ReconciliationResult(
@@ -189,9 +186,18 @@ class Reconciler:
                 service_id=intent.service_id,
                 action="start",
                 changed=True,
-                reason=(
-                    f"actual_state_{status_value}"
-                ),
+                reason=f"actual_state_{status_value}",
+            )
+
+        if status_value in {
+            "starting",
+            "stopping",
+        }:
+            return ReconciliationResult(
+                service_id=intent.service_id,
+                action="none",
+                changed=False,
+                reason=f"transition_in_progress_{status_value}",
             )
 
         if status_value == "migrating":
@@ -225,18 +231,14 @@ class Reconciler:
                 service_id=intent.service_id,
                 action="migrate",
                 changed=False,
-                reason=(
-                    "migration_requested"
-                ),
+                reason="migration_requested",
             )
 
         return ReconciliationResult(
             service_id=intent.service_id,
             action="migrate",
             changed=True,
-            reason=(
-                "service_requires_reconciliation"
-            ),
+            reason="service_requires_reconciliation",
         )
 
     async def _reconcile_stopped(
@@ -245,8 +247,6 @@ class Reconciler:
         actual_service: Optional[object],
         stop_service,
     ) -> ReconciliationResult:
-        """Ensure a STOPPED-intent service is stopped."""
-
         if actual_service is None:
             return ReconciliationResult(
                 service_id=intent.service_id,
@@ -259,17 +259,28 @@ class Reconciler:
             actual_service
         )
 
-        if status_value in {
-            "stopped",
-            "failed",
-        }:
+        if status_value == "stopped":
             return ReconciliationResult(
                 service_id=intent.service_id,
                 action="none",
                 changed=False,
-                reason=(
-                    f"already_{status_value}"
-                ),
+                reason="already_stopped",
+            )
+
+        if status_value == "failed":
+            return ReconciliationResult(
+                service_id=intent.service_id,
+                action="none",
+                changed=False,
+                reason="already_failed",
+            )
+
+        if status_value == "migrating":
+            return ReconciliationResult(
+                service_id=intent.service_id,
+                action="none",
+                changed=False,
+                reason="migration_in_progress",
             )
 
         await stop_service(
@@ -290,8 +301,6 @@ class Reconciler:
         stop_service,
         migrate_service,
     ) -> list[ReconciliationResult]:
-        """Reconcile all registered service intents."""
-
         if not isinstance(
             actual_services,
             dict,
@@ -322,6 +331,9 @@ class Reconciler:
                     migrate_service=migrate_service,
                 )
 
+            except asyncio.CancelledError:
+                raise
+
             except (
                 RuntimeError,
                 TimeoutError,
@@ -335,6 +347,8 @@ class Reconciler:
                     reason=str(exc),
                 )
 
-            results.append(result)
+            results.append(
+                result
+            )
 
         return results
