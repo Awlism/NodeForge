@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -14,7 +15,46 @@ class RuntimeGuardResult:
 
 
 class RuntimeGuard:
-    """Validate basic lifecycle operation preconditions."""
+    """Validate lifecycle operation preconditions and limits."""
+
+    DEFAULT_MAX_SERVICE_ID_LENGTH = 128
+    DEFAULT_MAX_COMMAND_LENGTH = 4096
+    DEFAULT_MAX_TIMEOUT_SECONDS = 300.0
+
+    def __init__(
+        self,
+        *,
+        max_service_id_length: int = DEFAULT_MAX_SERVICE_ID_LENGTH,
+        max_command_length: int = DEFAULT_MAX_COMMAND_LENGTH,
+        max_timeout_seconds: float = DEFAULT_MAX_TIMEOUT_SECONDS,
+    ) -> None:
+        if max_service_id_length <= 0:
+            raise ValueError(
+                "max_service_id_length must be positive"
+            )
+
+        if max_command_length <= 0:
+            raise ValueError(
+                "max_command_length must be positive"
+            )
+
+        if (
+            not math.isfinite(max_timeout_seconds)
+            or max_timeout_seconds <= 0
+        ):
+            raise ValueError(
+                "max_timeout_seconds must be positive and finite"
+            )
+
+        self.max_service_id_length = (
+            max_service_id_length
+        )
+        self.max_command_length = (
+            max_command_length
+        )
+        self.max_timeout_seconds = (
+            max_timeout_seconds
+        )
 
     def validate_service_id(
         self,
@@ -26,10 +66,18 @@ class RuntimeGuard:
                 reason="service_id_must_be_string",
             )
 
-        if not service_id.strip():
+        value = service_id.strip()
+
+        if not value:
             return RuntimeGuardResult(
                 allowed=False,
                 reason="service_id_required",
+            )
+
+        if len(value) > self.max_service_id_length:
+            return RuntimeGuardResult(
+                allowed=False,
+                reason="service_id_too_long",
             )
 
         return RuntimeGuardResult(
@@ -47,10 +95,18 @@ class RuntimeGuard:
                 reason="command_must_be_string",
             )
 
-        if not command.strip():
+        value = command.strip()
+
+        if not value:
             return RuntimeGuardResult(
                 allowed=False,
                 reason="command_required",
+            )
+
+        if len(value) > self.max_command_length:
+            return RuntimeGuardResult(
+                allowed=False,
+                reason="command_too_long",
             )
 
         return RuntimeGuardResult(
@@ -62,10 +118,31 @@ class RuntimeGuard:
         self,
         timeout_seconds: float,
     ) -> RuntimeGuardResult:
+        if not isinstance(
+            timeout_seconds,
+            (int, float),
+        ):
+            return RuntimeGuardResult(
+                allowed=False,
+                reason="timeout_must_be_number",
+            )
+
+        if not math.isfinite(timeout_seconds):
+            return RuntimeGuardResult(
+                allowed=False,
+                reason="timeout_must_be_finite",
+            )
+
         if timeout_seconds <= 0:
             return RuntimeGuardResult(
                 allowed=False,
                 reason="timeout_must_be_positive",
+            )
+
+        if timeout_seconds > self.max_timeout_seconds:
+            return RuntimeGuardResult(
+                allowed=False,
+                reason="timeout_too_large",
             )
 
         return RuntimeGuardResult(
