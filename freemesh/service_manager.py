@@ -10,7 +10,7 @@ from freemesh.service import Service
 
 
 class ServiceManager:
-    """Manage NodeForge services and their running processes."""
+    """Manage NodeForge services and their processes."""
 
     DEFAULT_STOP_TIMEOUT_SECONDS = 5.0
     MAX_SERVICE_ID_LENGTH = 128
@@ -19,22 +19,28 @@ class ServiceManager:
     def __init__(
         self,
         max_restart_attempts: int = 3,
-        stop_timeout_seconds: float = (
-            DEFAULT_STOP_TIMEOUT_SECONDS
-        ),
-    ):
-        if max_restart_attempts < 0:
+        stop_timeout_seconds: float = DEFAULT_STOP_TIMEOUT_SECONDS,
+    ) -> None:
+        if (
+            not isinstance(max_restart_attempts, int)
+            or isinstance(max_restart_attempts, bool)
+            or max_restart_attempts < 0
+        ):
             raise ValueError(
-                "max_restart_attempts cannot be negative"
+                "max_restart_attempts must be a non-negative integer"
             )
 
-        if stop_timeout_seconds <= 0:
+        if (
+            not isinstance(stop_timeout_seconds, (int, float))
+            or isinstance(stop_timeout_seconds, bool)
+            or stop_timeout_seconds <= 0
+        ):
             raise ValueError(
                 "stop_timeout_seconds must be positive"
             )
 
         self.max_restart_attempts = max_restart_attempts
-        self.stop_timeout_seconds = (
+        self.stop_timeout_seconds = float(
             stop_timeout_seconds
         )
 
@@ -47,6 +53,8 @@ class ServiceManager:
             str,
             Service,
         ] = {}
+
+        self._lock = asyncio.Lock()
 
     @classmethod
     def validate_service_id(
@@ -91,18 +99,30 @@ class ServiceManager:
             )
 
         try:
-            shlex.split(command)
+            argv = shlex.split(command)
         except ValueError as exc:
             raise ValueError(
-                "command contains invalid shell quoting"
+                "command contains invalid quoting"
             ) from exc
+
+        if not argv:
+            raise ValueError(
+                "command produced no executable"
+            )
+
+    @classmethod
+    def command_to_argv(
+        cls,
+        command: str,
+    ) -> list[str]:
+        cls.validate_command(command)
+
+        return shlex.split(command)
 
     def get_service(
         self,
         service_id: str,
     ) -> Optional[Service]:
-        """Return a service model by ID."""
-
         return self._service_models.get(
             service_id
         )
@@ -111,8 +131,6 @@ class ServiceManager:
         self,
         service_id: str,
     ) -> Optional[asyncio.subprocess.Process]:
-        """Return the running process for a service."""
-
         return self._services.get(
             service_id
         )
@@ -121,61 +139,56 @@ class ServiceManager:
         self,
         service_id: str,
     ) -> bool:
-        """Return whether a service exists."""
-
         return service_id in self._service_models
 
     def list_services(
         self,
     ) -> list[Service]:
-        """Return all registered services."""
-
         return list(
             self._service_models.values()
         )
 
-    def cleanup_exited_service(
+    def register_process(
         self,
         service_id: str,
-    ) -> bool:
-        """Remove a service whose process has exited."""
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        """Register an externally-created process safely."""
 
-        process = self._services.get(
+        self.validate_service_id(
             service_id
         )
 
-        if (
-            process is None
-            or process.returncode is None
+        if not isinstance(
+            process,
+            asyncio.subprocess.Process,
         ):
-            return False
+            raise TypeError(
+                "process must be an asyncio subprocess Process"
+            )
 
-        self._services.pop(
+        self._services[
+            service_id
+        ] = process
+
+    def unregister_process(
+        self,
+        service_id: str,
+    ) -> Optional[
+        asyncio.subprocess.Process
+    ]:
+        return self._services.pop(
             service_id,
             None,
         )
-
-        self._service_models.pop(
-            service_id,
-            None,
-        )
-
-        return True
 
     async def _spawn_process(
         self,
         command: str,
     ) -> asyncio.subprocess.Process:
-        """Create a service process without invoking a shell."""
-
-        self.validate_command(command)
-
-        argv = shlex.split(command)
-
-        if not argv:
-            raise ValueError(
-                "command produced no executable"
-            )
+        argv = self.command_to_argv(
+            command
+        )
 
         return await asyncio.create_subprocess_exec(
             *argv,
@@ -186,176 +199,186 @@ class ServiceManager:
         service_id: str,
         command: str,
     ) -> Service:
-        """Start a new service process."""
-
         self.validate_service_id(
             service_id
         )
-
         self.validate_command(
             command
         )
 
-        existing_process = self._services.get(
-            service_id
-        )
-
-        if (
-            existing_process is not None
-            and existing_process.returncode is None
-        ):
-            raise RuntimeError(
-                f"Service {service_id} is already running"
+        async with self._lock:
+            existing_process = (
+                self._services.get(
+                    service_id
+                )
             )
 
-        service = Service(
-            service_id=service_id,
-            command=command,
-            max_restart_attempts=(
-                self.max_restart_attempts
-            ),
-        )
+            if (
+                existing_process is not None
+                and existing_process.returncode is None
+            ):
+                raise RuntimeError(
+                    f"Service {service_id} is already running"
+                )
 
-        self._service_models[
-            service_id
-        ] = service
-
-        service.mark_starting()
-
-        try:
-            process = await self._spawn_process(
-                command
+            self._services.pop(
+                service_id,
+                None,
             )
 
-            self._services[
+            service = Service(
+                service_id=service_id,
+                command=command,
+                max_restart_attempts=(
+                    self.max_restart_attempts
+                ),
+            )
+
+            self._service_models[
                 service_id
-            ] = process
+            ] = service
 
-            service.mark_running(
-                pid=process.pid
-            )
+            service.mark_starting()
 
-            return service
+            try:
+                process = await self._spawn_process(
+                    command
+                )
 
-        except asyncio.CancelledError:
-            self._service_models.pop(
-                service_id,
-                None,
-            )
-            self._services.pop(
-                service_id,
-                None,
-            )
-            raise
+                self._services[
+                    service_id
+                ] = process
 
-        except Exception:
-            self._service_models.pop(
-                service_id,
-                None,
-            )
-            self._services.pop(
-                service_id,
-                None,
-            )
+                service.mark_running(
+                    pid=process.pid
+                )
 
-            service.mark_failed()
-            raise
+                return service
+
+            except asyncio.CancelledError:
+                self._service_models.pop(
+                    service_id,
+                    None,
+                )
+                self._services.pop(
+                    service_id,
+                    None,
+                )
+                raise
+
+            except Exception:
+                self._service_models.pop(
+                    service_id,
+                    None,
+                )
+                self._services.pop(
+                    service_id,
+                    None,
+                )
+                service.mark_failed()
+                raise
 
     async def stop_service(
         self,
         service_id: str,
     ) -> Service:
-        """Stop a running service."""
-
         self.validate_service_id(
             service_id
         )
 
-        service = self._service_models.get(
-            service_id
-        )
-
-        process = self._services.get(
-            service_id
-        )
-
-        if (
-            service is None
-            or process is None
-        ):
-            raise KeyError(
-                f"Service {service_id} not found"
+        async with self._lock:
+            service = self._service_models.get(
+                service_id
             )
 
-        service.mark_stopping()
-
-        try:
-            if process.returncode is None:
-                process.terminate()
-
-                try:
-                    await asyncio.wait_for(
-                        process.wait(),
-                        timeout=(
-                            self.stop_timeout_seconds
-                        ),
-                    )
-
-                except asyncio.TimeoutError:
-                    process.kill()
-
-                    await asyncio.wait_for(
-                        process.wait(),
-                        timeout=(
-                            self.stop_timeout_seconds
-                        ),
-                    )
-
-            service.mark_stopped()
-
-        except asyncio.CancelledError:
-            if process.returncode is None:
-                try:
-                    process.kill()
-                    await process.wait()
-                except Exception:
-                    pass
-
-            service.mark_failed()
-            raise
-
-        except Exception:
-            service.mark_failed()
-            raise
-
-        finally:
-            self._services.pop(
-                service_id,
-                None,
+            process = self._services.get(
+                service_id
             )
 
-            self._service_models.pop(
-                service_id,
-                None,
-            )
+            if (
+                service is None
+                or process is None
+            ):
+                raise KeyError(
+                    f"Service {service_id} not found"
+                )
 
-        return service
+            service.mark_stopping()
 
-    async def stop_all(self) -> None:
-        """Stop all managed services."""
+            try:
+                if process.returncode is None:
+                    process.terminate()
 
+                    try:
+                        await asyncio.wait_for(
+                            process.wait(),
+                            timeout=(
+                                self.stop_timeout_seconds
+                            ),
+                        )
+                    except asyncio.TimeoutError:
+                        process.kill()
+
+                        await asyncio.wait_for(
+                            process.wait(),
+                            timeout=(
+                                self.stop_timeout_seconds
+                            ),
+                        )
+
+                service.mark_stopped()
+
+            except asyncio.CancelledError:
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                        await process.wait()
+                    except Exception:
+                        pass
+
+                service.mark_failed()
+                raise
+
+            except Exception:
+                service.mark_failed()
+                raise
+
+            finally:
+                self._services.pop(
+                    service_id,
+                    None,
+                )
+
+                self._service_models.pop(
+                    service_id,
+                    None,
+                )
+
+            return service
+
+    async def stop_all(
+        self,
+    ) -> None:
         service_ids = list(
             self._service_models
         )
+
+        errors: list[Exception] = []
 
         for service_id in service_ids:
             try:
                 await self.stop_service(
                     service_id
                 )
-            except (
-                asyncio.CancelledError,
-            ):
+            except asyncio.CancelledError:
                 raise
-            except Exception:
-                continue
+            except Exception as exc:
+                errors.append(
+                    exc
+                )
+
+        if errors:
+            raise RuntimeError(
+                f"Failed to stop "
+                f"{len(errors)} service(s)"
+            )
