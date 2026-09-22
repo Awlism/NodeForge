@@ -57,6 +57,22 @@ class Reconciler:
 
         self.intent_registry = intent_registry
 
+    @staticmethod
+    def _status_value(
+        service: object,
+    ) -> object:
+        status = getattr(
+            service,
+            "status",
+            None,
+        )
+
+        return getattr(
+            status,
+            "value",
+            status,
+        )
+
     async def reconcile(
         self,
         service_id: str,
@@ -65,9 +81,11 @@ class Reconciler:
         stop_service,
         migrate_service,
     ) -> ReconciliationResult:
-        """Reconcile one service against its desired state."""
+        """Reconcile one service against desired state."""
 
-        intent = self.intent_registry.get(service_id)
+        intent = self.intent_registry.get(
+            service_id
+        )
 
         if intent is None:
             return ReconciliationResult(
@@ -77,7 +95,10 @@ class Reconciler:
                 reason="no_intent",
             )
 
-        if intent.desired_state == DesiredState.RUNNING:
+        if (
+            intent.desired_state
+            == DesiredState.RUNNING
+        ):
             return await self._reconcile_running(
                 intent=intent,
                 actual_service=actual_service,
@@ -85,7 +106,10 @@ class Reconciler:
                 migrate_service=migrate_service,
             )
 
-        if intent.desired_state == DesiredState.STOPPED:
+        if (
+            intent.desired_state
+            == DesiredState.STOPPED
+        ):
             return await self._reconcile_stopped(
                 intent=intent,
                 actual_service=actual_service,
@@ -106,7 +130,7 @@ class Reconciler:
         start_service,
         migrate_service,
     ) -> ReconciliationResult:
-        """Ensure a service with RUNNING intent is running."""
+        """Ensure a RUNNING-intent service is running."""
 
         if actual_service is None:
             if not intent.command:
@@ -130,16 +154,8 @@ class Reconciler:
                 reason="service_missing",
             )
 
-        status = getattr(
-            actual_service,
-            "status",
-            None,
-        )
-
-        status_value = getattr(
-            status,
-            "value",
-            status,
+        status_value = self._status_value(
+            actual_service
         )
 
         if status_value == "running":
@@ -173,7 +189,9 @@ class Reconciler:
                 service_id=intent.service_id,
                 action="start",
                 changed=True,
-                reason=f"actual_state_{status_value}",
+                reason=(
+                    f"actual_state_{status_value}"
+                ),
             )
 
         if status_value == "migrating":
@@ -184,11 +202,41 @@ class Reconciler:
                 reason="migration_in_progress",
             )
 
+        try:
+            migration_result = await migrate_service(
+                intent.service_id
+            )
+
+        except (
+            RuntimeError,
+            TimeoutError,
+            KeyError,
+            ValueError,
+        ) as exc:
+            return ReconciliationResult(
+                service_id=intent.service_id,
+                action="error",
+                changed=False,
+                reason=str(exc),
+            )
+
+        if migration_result is None:
+            return ReconciliationResult(
+                service_id=intent.service_id,
+                action="migrate",
+                changed=False,
+                reason=(
+                    "migration_requested"
+                ),
+            )
+
         return ReconciliationResult(
             service_id=intent.service_id,
             action="migrate",
             changed=True,
-            reason="service_requires_reconciliation",
+            reason=(
+                "service_requires_reconciliation"
+            ),
         )
 
     async def _reconcile_stopped(
@@ -197,7 +245,7 @@ class Reconciler:
         actual_service: Optional[object],
         stop_service,
     ) -> ReconciliationResult:
-        """Ensure a service with STOPPED intent is stopped."""
+        """Ensure a STOPPED-intent service is stopped."""
 
         if actual_service is None:
             return ReconciliationResult(
@@ -207,16 +255,8 @@ class Reconciler:
                 reason="already_absent",
             )
 
-        status = getattr(
-            actual_service,
-            "status",
-            None,
-        )
-
-        status_value = getattr(
-            status,
-            "value",
-            status,
+        status_value = self._status_value(
+            actual_service
         )
 
         if status_value in {
@@ -227,7 +267,9 @@ class Reconciler:
                 service_id=intent.service_id,
                 action="none",
                 changed=False,
-                reason=f"already_{status_value}",
+                reason=(
+                    f"already_{status_value}"
+                ),
             )
 
         await stop_service(
@@ -250,20 +292,48 @@ class Reconciler:
     ) -> list[ReconciliationResult]:
         """Reconcile all registered service intents."""
 
-        results: list[ReconciliationResult] = []
-
-        for intent in self.intent_registry.list_all():
-            actual_service = actual_services.get(
-                intent.service_id
+        if not isinstance(
+            actual_services,
+            dict,
+        ):
+            raise TypeError(
+                "actual_services must be a dict"
             )
 
-            result = await self.reconcile(
-                service_id=intent.service_id,
-                actual_service=actual_service,
-                start_service=start_service,
-                stop_service=stop_service,
-                migrate_service=migrate_service,
+        results: list[
+            ReconciliationResult
+        ] = []
+
+        for intent in (
+            self.intent_registry.list_all()
+        ):
+            actual_service = (
+                actual_services.get(
+                    intent.service_id
+                )
             )
+
+            try:
+                result = await self.reconcile(
+                    service_id=intent.service_id,
+                    actual_service=actual_service,
+                    start_service=start_service,
+                    stop_service=stop_service,
+                    migrate_service=migrate_service,
+                )
+
+            except (
+                RuntimeError,
+                TimeoutError,
+                KeyError,
+                ValueError,
+            ) as exc:
+                result = ReconciliationResult(
+                    service_id=intent.service_id,
+                    action="error",
+                    changed=False,
+                    reason=str(exc),
+                )
 
             results.append(result)
 
