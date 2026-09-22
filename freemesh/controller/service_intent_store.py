@@ -17,9 +17,12 @@ from freemesh.service_requirements import (
 
 
 class ServiceIntentStore:
-    """Persist service intents using SQLite."""
+    """Persist service intents using resilient SQLite settings."""
 
-    def __init__(self, database_path: str) -> None:
+    def __init__(
+        self,
+        database_path: str,
+    ) -> None:
         if not database_path:
             raise ValueError(
                 "database_path is required"
@@ -34,14 +37,37 @@ class ServiceIntentStore:
             )
 
         self._connection = sqlite3.connect(
-            database_path
+            database_path,
+            timeout=30.0,
+            isolation_level=None,
         )
 
         self._connection.row_factory = (
             sqlite3.Row
         )
 
+        self._configure_database()
         self._initialize()
+
+    def _configure_database(self) -> None:
+        """Configure SQLite for reliable controller state."""
+
+        self._connection.execute(
+            "PRAGMA busy_timeout = 30000"
+        )
+
+        self._connection.execute(
+            "PRAGMA foreign_keys = ON"
+        )
+
+        if self.database_path != ":memory:":
+            self._connection.execute(
+                "PRAGMA journal_mode = WAL"
+            )
+
+        self._connection.execute(
+            "PRAGMA synchronous = NORMAL"
+        )
 
     def _initialize(self) -> None:
         """Create the storage schema."""
@@ -57,8 +83,6 @@ class ServiceIntentStore:
             )
             """
         )
-
-        self._connection.commit()
 
     def save(
         self,
@@ -80,7 +104,12 @@ class ServiceIntentStore:
             sort_keys=True,
         )
 
-        updated_at = intent.updated_at.isoformat()
+        updated_at = intent.updated_at
+
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(
+                tzinfo=timezone.utc
+            )
 
         self._connection.execute(
             """
@@ -104,11 +133,9 @@ class ServiceIntentStore:
                 intent.desired_state.value,
                 intent.command,
                 requirements_json,
-                updated_at,
+                updated_at.isoformat(),
             ),
         )
-
-        self._connection.commit()
 
         return intent
 
@@ -137,7 +164,9 @@ class ServiceIntentStore:
 
         return self._row_to_intent(row)
 
-    def list_all(self) -> list[ServiceIntent]:
+    def list_all(
+        self,
+    ) -> list[ServiceIntent]:
         """Load all persisted service intents."""
 
         rows = self._connection.execute(
@@ -162,10 +191,7 @@ class ServiceIntentStore:
         self,
         service_id: str,
     ) -> bool:
-        """Delete an intent.
-
-        Returns True when a row was deleted.
-        """
+        """Delete an intent."""
 
         cursor = self._connection.execute(
             """
@@ -174,8 +200,6 @@ class ServiceIntentStore:
             """,
             (service_id,),
         )
-
-        self._connection.commit()
 
         return cursor.rowcount > 0
 
