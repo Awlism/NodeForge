@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import shlex
 
-from freemesh.service import Service, ServiceHealth
-from freemesh.service_health import ServiceHealthChecker
-from freemesh.service_manager import ServiceManager
+from freemesh.service import (
+    Service,
+    ServiceHealth,
+)
+from freemesh.service_health import (
+    ServiceHealthChecker,
+)
+from freemesh.service_manager import (
+    ServiceManager,
+)
 
 
 class RestartEngine:
@@ -20,17 +26,29 @@ class RestartEngine:
         health_checker: ServiceHealthChecker | None = None,
         startup_grace_seconds: float = 0.05,
     ) -> None:
-        if max_restart_attempts < 0:
+        if (
+            not isinstance(max_restart_attempts, int)
+            or isinstance(max_restart_attempts, bool)
+            or max_restart_attempts < 0
+        ):
             raise ValueError(
                 "max_restart_attempts cannot be negative"
             )
 
-        if backoff_seconds < 0:
+        if (
+            not isinstance(backoff_seconds, (int, float))
+            or isinstance(backoff_seconds, bool)
+            or backoff_seconds < 0
+        ):
             raise ValueError(
                 "backoff_seconds cannot be negative"
             )
 
-        if startup_grace_seconds < 0:
+        if (
+            not isinstance(startup_grace_seconds, (int, float))
+            or isinstance(startup_grace_seconds, bool)
+            or startup_grace_seconds < 0
+        ):
             raise ValueError(
                 "startup_grace_seconds cannot be negative"
             )
@@ -39,11 +57,11 @@ class RestartEngine:
             max_restart_attempts
         )
 
-        self.backoff_seconds = (
+        self.backoff_seconds = float(
             backoff_seconds
         )
 
-        self.startup_grace_seconds = (
+        self.startup_grace_seconds = float(
             startup_grace_seconds
         )
 
@@ -57,18 +75,9 @@ class RestartEngine:
         self,
         command: str,
     ) -> asyncio.subprocess.Process:
-        """Start a service without invoking a shell."""
-
-        ServiceManager.validate_command(
+        argv = ServiceManager.command_to_argv(
             command
         )
-
-        argv = shlex.split(command)
-
-        if not argv:
-            raise ValueError(
-                "command produced no executable"
-            )
 
         return await asyncio.create_subprocess_exec(
             *argv,
@@ -79,8 +88,6 @@ class RestartEngine:
         process: asyncio.subprocess.Process,
         timeout_seconds: float = 2.0,
     ) -> None:
-        """Terminate a process and force-kill it if necessary."""
-
         if process.returncode is not None:
             return
 
@@ -91,7 +98,6 @@ class RestartEngine:
                 process.wait(),
                 timeout=timeout_seconds,
             )
-
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
@@ -102,7 +108,21 @@ class RestartEngine:
         service_manager: ServiceManager,
         node_id: str | None = None,
     ) -> bool:
-        """Restart a crashed service."""
+        if not isinstance(
+            service,
+            Service,
+        ):
+            raise TypeError(
+                "service must be a Service instance"
+            )
+
+        if not isinstance(
+            service_manager,
+            ServiceManager,
+        ):
+            raise TypeError(
+                "service_manager must be a ServiceManager instance"
+            )
 
         if service.status.value not in {
             "crashed",
@@ -144,9 +164,10 @@ class RestartEngine:
                     service.command
                 )
 
-                service_manager._services[
-                    service.service_id
-                ] = process
+                service_manager.register_process(
+                    service.service_id,
+                    process,
+                )
 
                 service.restart_attempts += 1
 
@@ -168,9 +189,8 @@ class RestartEngine:
 
                         service.mark_crashed()
 
-                        service_manager._services.pop(
-                            service.service_id,
-                            None,
+                        service_manager.unregister_process(
+                            service.service_id
                         )
 
                         continue
@@ -184,16 +204,18 @@ class RestartEngine:
                     )
                 )
 
-                if health == ServiceHealth.HEALTHY:
+                if (
+                    health
+                    == ServiceHealth.HEALTHY
+                ):
                     return True
 
                 await self._terminate_process(
                     process
                 )
 
-                service_manager._services.pop(
-                    service.service_id,
-                    None,
+                service_manager.unregister_process(
+                    service.service_id
                 )
 
                 service.mark_crashed()
@@ -207,9 +229,8 @@ class RestartEngine:
                     except Exception:
                         pass
 
-                service_manager._services.pop(
-                    service.service_id,
-                    None,
+                service_manager.unregister_process(
+                    service.service_id
                 )
 
                 raise
@@ -223,9 +244,8 @@ class RestartEngine:
                     except Exception:
                         pass
 
-                service_manager._services.pop(
-                    service.service_id,
-                    None,
+                service_manager.unregister_process(
+                    service.service_id
                 )
 
                 service.restart_attempts += 1
