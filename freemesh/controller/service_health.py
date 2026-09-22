@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
+
+from freemesh.protocol.messages import (
+    BaseMessage,
+    MessageType,
+)
 
 if TYPE_CHECKING:
     from freemesh.controller.controller import Controller
@@ -16,7 +22,9 @@ class ServiceHealthManager:
         controller: "Controller",
     ) -> None:
         if controller is None:
-            raise TypeError("controller is required")
+            raise TypeError(
+                "controller is required"
+            )
 
         self.controller = controller
 
@@ -47,18 +55,20 @@ class ServiceHealthManager:
             node_id
         )
 
-        # If the service owner has no active transport,
-        # use the existing failure/recovery path.
         if transport is None:
-            failure_message = (
-                controller._build_service_failure_message(
-                    service=service,
-                    status="failed",
-                    error=(
+            failure_message = BaseMessage(
+                type=MessageType.SERVICE_FAILURE,
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "service_id": service_id,
+                    "node_id": node_id,
+                    "status": "failed",
+                    "error": (
                         "Health monitor detected "
                         "missing node transport"
                     ),
-                )
+                    "restart_attempts": 0,
+                },
             )
 
             return await controller._handle_service_failure(
@@ -118,20 +128,23 @@ class ServiceHealthManager:
             "crashed",
             "failed",
         }:
-            failure_message = (
-                controller._build_service_failure_message(
-                    service=service,
-                    status=runtime_status,
-                    error=(
+            failure_message = BaseMessage(
+                type=MessageType.SERVICE_FAILURE,
+                message_id=str(uuid.uuid4()),
+                payload={
+                    "service_id": service_id,
+                    "node_id": node_id,
+                    "status": runtime_status,
+                    "error": (
                         "Health monitor detected "
                         "runtime status: "
                         f"{runtime_status}"
                     ),
-                    restart_attempts=payload.get(
+                    "restart_attempts": payload.get(
                         "restart_attempts",
                         0,
                     ),
-                )
+                },
             )
 
             return await controller._handle_service_failure(
@@ -167,6 +180,4 @@ class ServiceHealthManager:
                 continue
 
             except Exception:
-                # A single unhealthy service must never stop
-                # monitoring the remaining services.
                 continue
