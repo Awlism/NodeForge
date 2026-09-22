@@ -50,9 +50,20 @@ class ServiceHealthManager:
         # If the service owner has no active transport,
         # use the existing failure/recovery path.
         if transport is None:
+            failure_message = (
+                controller._build_service_failure_message(
+                    service=service,
+                    status="failed",
+                    error=(
+                        "Health monitor detected "
+                        "missing node transport"
+                    ),
+                )
+            )
+
             return await controller._handle_service_failure(
-                service,
-                node_id,
+                node_id=node_id,
+                message=failure_message,
             )
 
         try:
@@ -77,9 +88,11 @@ class ServiceHealthManager:
         if not isinstance(payload, dict):
             return None
 
-        status = payload.get("status")
+        runtime_status = payload.get(
+            "status"
+        )
 
-        if status in {
+        if runtime_status in {
             "not_found",
             "stopped",
         }:
@@ -93,28 +106,44 @@ class ServiceHealthManager:
                 current_service is not None
                 and current_service.node_id == node_id
             ):
-                controller.service_registry.update_status(
-                    service_id,
-                    "stopped",
+                controller.service_registry.update_service(
+                    service_id=service_id,
+                    status="stopped",
+                    pid=None,
                 )
 
-            return status
+            return runtime_status
 
-        if status in {
+        if runtime_status in {
             "crashed",
             "failed",
         }:
-            # Keep failure recording and recovery in the existing
-            # Controller failure path.
-            return await controller._handle_service_failure(
-                service,
-                node_id,
-                response,
+            failure_message = (
+                controller._build_service_failure_message(
+                    service=service,
+                    status=runtime_status,
+                    error=(
+                        "Health monitor detected "
+                        "runtime status: "
+                        f"{runtime_status}"
+                    ),
+                    restart_attempts=payload.get(
+                        "restart_attempts",
+                        0,
+                    ),
+                )
             )
 
-        return status
+            return await controller._handle_service_failure(
+                node_id=node_id,
+                message=failure_message,
+            )
 
-    async def monitor_once(self) -> None:
+        return runtime_status
+
+    async def monitor_once(
+        self,
+    ) -> None:
         """Run one health-monitoring pass over all services."""
 
         controller = self.controller
@@ -128,6 +157,14 @@ class ServiceHealthManager:
                 await self.check_service(
                     service.service_id
                 )
+
+            except (
+                RuntimeError,
+                TimeoutError,
+                KeyError,
+                ValueError,
+            ):
+                continue
 
             except Exception:
                 # A single unhealthy service must never stop
