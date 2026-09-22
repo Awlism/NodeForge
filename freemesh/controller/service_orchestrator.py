@@ -1,4 +1,3 @@
-cat > freemesh/controller/service_orchestrator.py <<'PY'
 """Service lifecycle orchestration for NodeForge.
 
 This layer coordinates service lifecycle operations without owning
@@ -155,4 +154,3 @@ class ServiceOrchestrator:
                 )
 
         return results
-PY
