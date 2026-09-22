@@ -1,18 +1,30 @@
 """Persistent storage for NodeForge service metadata."""
 
+from __future__ import annotations
+
 import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from freemesh.service_requirements import ServiceRequirements
+from freemesh.service_requirements import (
+    ServiceRequirements,
+)
 
 
 class ServiceMetadataStore:
     """SQLite-backed persistent storage for service metadata."""
 
-    def __init__(self, database_path: str) -> None:
+    def __init__(
+        self,
+        database_path: str,
+    ) -> None:
+        if not database_path:
+            raise ValueError(
+                "database_path is required"
+            )
+
         self.database_path = database_path
 
         if database_path != ":memory:":
@@ -22,13 +34,41 @@ class ServiceMetadataStore:
             )
 
         self._connection = sqlite3.connect(
-            database_path
+            database_path,
+            timeout=30.0,
+            isolation_level=None,
         )
-        self._connection.row_factory = sqlite3.Row
 
+        self._connection.row_factory = (
+            sqlite3.Row
+        )
+
+        self._configure_database()
         self._initialize()
 
+    def _configure_database(self) -> None:
+        """Configure SQLite for reliable metadata persistence."""
+
+        self._connection.execute(
+            "PRAGMA busy_timeout = 30000"
+        )
+
+        self._connection.execute(
+            "PRAGMA foreign_keys = ON"
+        )
+
+        if self.database_path != ":memory:":
+            self._connection.execute(
+                "PRAGMA journal_mode = WAL"
+            )
+
+        self._connection.execute(
+            "PRAGMA synchronous = NORMAL"
+        )
+
     def _initialize(self) -> None:
+        """Create the metadata schema."""
+
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS service_metadata (
@@ -45,12 +85,10 @@ class ServiceMetadataStore:
             """
         )
 
-        self._connection.commit()
-
     def save(
         self,
         service_id: str,
-        node_id: str,
+        node_id: Optional[str],
         pid: Optional[int],
         status: str,
         health: str,
@@ -61,9 +99,74 @@ class ServiceMetadataStore:
     ) -> None:
         """Save or update service metadata."""
 
-        if not service_id:
+        if (
+            not isinstance(
+                service_id,
+                str,
+            )
+            or not service_id.strip()
+        ):
             raise ValueError(
                 "service_id cannot be empty"
+            )
+
+        if (
+            node_id is not None
+            and (
+                not isinstance(
+                    node_id,
+                    str,
+                )
+                or not node_id.strip()
+            )
+        ):
+            raise ValueError(
+                "node_id must be a non-empty string or None"
+            )
+
+        if (
+            pid is not None
+            and (
+                not isinstance(
+                    pid,
+                    int,
+                )
+                or isinstance(
+                    pid,
+                    bool,
+                )
+                or pid <= 0
+            )
+        ):
+            raise ValueError(
+                "pid must be a positive integer or None"
+            )
+
+        if not isinstance(
+            status,
+            str,
+        ) or not status.strip():
+            raise ValueError(
+                "status cannot be empty"
+            )
+
+        if not isinstance(
+            health,
+            str,
+        ) or not health.strip():
+            raise ValueError(
+                "health cannot be empty"
+            )
+
+        if (
+            command is not None
+            and not isinstance(
+                command,
+                str,
+            )
+        ):
+            raise TypeError(
+                "command must be a string or None"
             )
 
         if not isinstance(
@@ -75,9 +178,20 @@ class ServiceMetadataStore:
                 "a ServiceRequirements instance"
             )
 
-        if restart_attempts < 0:
+        if (
+            not isinstance(
+                restart_attempts,
+                int,
+            )
+            or isinstance(
+                restart_attempts,
+                bool,
+            )
+            or restart_attempts < 0
+        ):
             raise ValueError(
-                "restart_attempts cannot be negative"
+                "restart_attempts must be "
+                "a non-negative integer"
             )
 
         if updated_at is None:
@@ -91,7 +205,9 @@ class ServiceMetadataStore:
             )
 
         requirements_json = json.dumps(
-            requirements.to_dict()
+            requirements.to_dict(),
+            separators=(",", ":"),
+            sort_keys=True,
         )
 
         self._connection.execute(
@@ -119,7 +235,8 @@ class ServiceMetadataStore:
                     excluded.requirements_json,
                 restart_attempts =
                     excluded.restart_attempts,
-                updated_at = excluded.updated_at
+                updated_at =
+                    excluded.updated_at
             """,
             (
                 service_id,
@@ -133,8 +250,6 @@ class ServiceMetadataStore:
                 updated_at.isoformat(),
             ),
         )
-
-        self._connection.commit()
 
     def get(
         self,
@@ -165,8 +280,10 @@ class ServiceMetadataStore:
 
         return self._row_to_metadata(row)
 
-    def list_all(self) -> list[dict[str, Any]]:
-        """Return all service metadata ordered by service ID."""
+    def list_all(
+        self,
+    ) -> list[dict[str, Any]]:
+        """Return all service metadata."""
 
         rows = self._connection.execute(
             """
@@ -190,11 +307,11 @@ class ServiceMetadataStore:
             for row in rows
         ]
 
-    def delete(self, service_id: str) -> bool:
-        """Delete service metadata.
-
-        Returns True if a record was deleted.
-        """
+    def delete(
+        self,
+        service_id: str,
+    ) -> bool:
+        """Delete service metadata."""
 
         cursor = self._connection.execute(
             """
@@ -204,12 +321,13 @@ class ServiceMetadataStore:
             (service_id,),
         )
 
-        self._connection.commit()
-
         return cursor.rowcount > 0
 
-    def exists(self, service_id: str) -> bool:
-        """Return whether metadata exists for a service."""
+    def exists(
+        self,
+        service_id: str,
+    ) -> bool:
+        """Return whether metadata exists."""
 
         row = self._connection.execute(
             """
@@ -228,12 +346,12 @@ class ServiceMetadataStore:
 
         row = self._connection.execute(
             """
-            SELECT COUNT(*)
+            SELECT COUNT(*) AS count
             FROM service_metadata
             """
         ).fetchone()
 
-        return int(row[0])
+        return int(row["count"])
 
     def close(self) -> None:
         """Close the SQLite connection."""
@@ -271,8 +389,8 @@ class ServiceMetadataStore:
                     requirements_payload
                 )
             ),
-            "restart_attempts": row[
-                "restart_attempts"
-            ],
+            "restart_attempts": int(
+                row["restart_attempts"]
+            ),
             "updated_at": updated_at,
         }
