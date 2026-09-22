@@ -165,6 +165,7 @@ async def test_orchestrator_uses_current_controller_methods():
     )
 
     assert second == "replacement"
+
     assert (
         controller.calls[-1][0]
         == "replacement_start"
@@ -195,6 +196,7 @@ async def test_orchestrator_ensure_stopped():
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_stopped_missing_service():
     controller = FakeController()
+
     orchestrator = ServiceOrchestrator(
         controller
     )
@@ -210,6 +212,7 @@ async def test_orchestrator_ensure_stopped_missing_service():
 @pytest.mark.asyncio
 async def test_orchestrator_recover():
     controller = FakeController()
+
     orchestrator = ServiceOrchestrator(
         controller
     )
@@ -230,6 +233,7 @@ async def test_orchestrator_recover():
 @pytest.mark.asyncio
 async def test_orchestrator_recover_missing_service():
     controller = FakeController()
+
     orchestrator = ServiceOrchestrator(
         controller
     )
@@ -245,6 +249,7 @@ async def test_orchestrator_recover_missing_service():
 @pytest.mark.asyncio
 async def test_orchestrator_migrate():
     controller = FakeController()
+
     orchestrator = ServiceOrchestrator(
         controller
     )
@@ -407,6 +412,7 @@ async def test_command_layer_missing_status_service():
     )
 
     assert result is None
+    assert controller.calls == []
 
 
 @pytest.mark.asyncio
