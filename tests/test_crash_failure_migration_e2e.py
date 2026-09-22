@@ -44,7 +44,7 @@ def print_migration_diagnostic(
     node_a: NodeAgent | None,
     node_b: NodeAgent | None,
 ) -> None:
-    """Print detailed migration state after a timeout."""
+    """Print detailed migration and crash state after a timeout."""
 
     print("\n")
     print("=" * 72)
@@ -371,15 +371,38 @@ async def test_crash_failure_triggers_automatic_migration(
 
             assert initial_pid is not None
 
-            await wait_until(
-                lambda: (
-                    controller.failure_manager.get_failure(
-                        "crash-migration-service"
-                    )
-                    is not None
-                ),
-                timeout=30.0,
-            )
+            # -------------------------------------------------
+            # IMPORTANT DEBUG POINT
+            #
+            # If SERVICE_FAILURE is never recorded, print the
+            # complete runtime state here instead of waiting
+            # silently for 30 seconds.
+            # -------------------------------------------------
+            try:
+                await wait_until(
+                    lambda: (
+                        controller.failure_manager.get_failure(
+                            "crash-migration-service"
+                        )
+                        is not None
+                    ),
+                    timeout=30.0,
+                )
+
+            except AssertionError:
+                print(
+                    "\n"
+                    "!!! FAILURE MANAGER TIMEOUT !!!"
+                )
+
+                print_migration_diagnostic(
+                    controller=controller,
+                    service_id="crash-migration-service",
+                    node_a=node_a,
+                    node_b=node_b,
+                )
+
+                raise
 
             failure = (
                 controller.failure_manager.get_failure(
