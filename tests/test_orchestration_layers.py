@@ -21,17 +21,64 @@ class FakeServiceRegistry:
         )
 
     def get_service(self, service_id):
+        if self.service is None:
+            return None
+
         if service_id == self.service.service_id:
             return self.service
+
         return None
 
     def list_services(self):
+        if self.service is None:
+            return []
+
         return [self.service]
 
     def list_node_services(self, node_id):
+        if self.service is None:
+            return []
+
         if node_id == self.service.node_id:
             return [self.service]
+
         return []
+
+    def update_service(
+        self,
+        service_id,
+        status=None,
+        pid=None,
+        node_id=None,
+        command=None,
+        requirements=None,
+    ):
+        if self.service is None:
+            raise KeyError(
+                f"Service {service_id} not found"
+            )
+
+        if service_id != self.service.service_id:
+            raise KeyError(
+                f"Service {service_id} not found"
+            )
+
+        if status is not None:
+            self.service.status = status
+
+        if pid is not None:
+            self.service.pid = pid
+
+        if node_id is not None:
+            self.service.node_id = node_id
+
+        if command is not None:
+            self.service.command = command
+
+        if requirements is not None:
+            self.service.requirements = requirements
+
+        return self.service
 
 
 class FakeController:
@@ -127,6 +174,7 @@ async def test_orchestrator_uses_current_controller_methods():
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_stopped():
     controller = FakeController()
+
     orchestrator = ServiceOrchestrator(
         controller
     )
