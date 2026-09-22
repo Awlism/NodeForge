@@ -5,8 +5,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Optional
 
-from freemesh.protocol.messages import BaseMessage, MessageType
-from freemesh.protocol.transport import TCPTransport
+from freemesh.protocol.messages import (
+    BaseMessage,
+    MessageType,
+)
+from freemesh.protocol.transport import (
+    TCPTransport,
+)
 
 
 class NodeClient:
@@ -19,18 +24,54 @@ class NodeClient:
         port: int,
         timeout: float = 10.0,
     ) -> None:
-        if not node_id:
-            raise ValueError("node_id is required")
+        if (
+            not isinstance(
+                node_id,
+                str,
+            )
+            or not node_id.strip()
+        ):
+            raise ValueError(
+                "node_id is required"
+            )
 
-        if not host:
-            raise ValueError("host is required")
+        if (
+            not isinstance(
+                host,
+                str,
+            )
+            or not host.strip()
+        ):
+            raise ValueError(
+                "host is required"
+            )
 
-        if not 1 <= port <= 65535:
+        if (
+            not isinstance(
+                port,
+                int,
+            )
+            or isinstance(
+                port,
+                bool,
+            )
+            or not 1 <= port <= 65535
+        ):
             raise ValueError(
                 "port must be between 1 and 65535"
             )
 
-        if timeout <= 0:
+        if (
+            not isinstance(
+                timeout,
+                (int, float),
+            )
+            or isinstance(
+                timeout,
+                bool,
+            )
+            or timeout <= 0
+        ):
             raise ValueError(
                 "timeout must be greater than 0"
             )
@@ -38,9 +79,11 @@ class NodeClient:
         self.node_id = node_id
         self.host = host
         self.port = port
-        self.timeout = timeout
+        self.timeout = float(timeout)
 
-        self.transport: Optional[TCPTransport] = None
+        self.transport: Optional[
+            TCPTransport
+        ] = None
 
         self.connected = False
         self.authenticated = False
@@ -51,21 +94,36 @@ class NodeClient:
         """Connect to the remote Node."""
 
         async with self._lock:
-            if self.connected and self.transport is not None:
+            if (
+                self.connected
+                and self.transport is not None
+            ):
                 return
 
             transport = TCPTransport(
                 host=self.host,
                 port=self.port,
+                connect_timeout_seconds=(
+                    self.timeout
+                ),
             )
 
-            await asyncio.wait_for(
-                transport.connect(
-                    self.host,
-                    self.port,
-                ),
-                timeout=self.timeout,
-            )
+            try:
+                await asyncio.wait_for(
+                    transport.connect(
+                        self.host,
+                        self.port,
+                    ),
+                    timeout=self.timeout,
+                )
+
+            except asyncio.CancelledError:
+                await transport.disconnect()
+                raise
+
+            except Exception:
+                await transport.disconnect()
+                raise
 
             self.transport = transport
             self.connected = True
@@ -92,34 +150,69 @@ class NodeClient:
     ) -> BaseMessage:
         """Send a message and wait for its response."""
 
-        if not isinstance(message, BaseMessage):
+        if not isinstance(
+            message,
+            BaseMessage,
+        ):
             raise TypeError(
                 "message must be a BaseMessage instance"
             )
 
-        transport = self.transport
+        async with self._lock:
+            transport = self.transport
 
-        if not self.connected or transport is None:
-            raise ConnectionError(
-                f"Node {self.node_id} is not connected"
-            )
+            if (
+                not self.connected
+                or transport is None
+            ):
+                raise ConnectionError(
+                    f"Node {self.node_id} "
+                    "is not connected"
+                )
 
-        await transport.send(message)
+            try:
+                await asyncio.wait_for(
+                    transport.send(message),
+                    timeout=self.timeout,
+                )
 
-        response = await asyncio.wait_for(
-            transport.receive(),
-            timeout=self.timeout,
-        )
+                response = await asyncio.wait_for(
+                    transport.receive(),
+                    timeout=self.timeout,
+                )
 
-        if response is None:
-            self.connected = False
-            self.authenticated = False
+            except asyncio.CancelledError:
+                raise
 
-            raise ConnectionError(
-                f"Node {self.node_id} disconnected"
-            )
+            except Exception:
+                self.connected = False
+                self.authenticated = False
 
-        return response
+                try:
+                    await transport.disconnect()
+                except Exception:
+                    pass
+
+                self.transport = None
+
+                raise
+
+            if response is None:
+                self.connected = False
+                self.authenticated = False
+
+                try:
+                    await transport.disconnect()
+                except Exception:
+                    pass
+
+                self.transport = None
+
+                raise ConnectionError(
+                    f"Node {self.node_id} disconnected"
+                )
+
+            return response
 
     async def authenticate(
         self,
@@ -127,8 +220,16 @@ class NodeClient:
     ) -> BaseMessage:
         """Authenticate with the remote Node."""
 
-        if not token:
-            raise ValueError("token is required")
+        if (
+            not isinstance(
+                token,
+                str,
+            )
+            or not token
+        ):
+            raise ValueError(
+                "token is required"
+            )
 
         message = BaseMessage(
             type=MessageType.AUTHENTICATE,
@@ -138,13 +239,21 @@ class NodeClient:
             },
         )
 
-        response = await self.send(message)
+        response = await self.send(
+            message
+        )
 
-        if response.type == MessageType.AUTHENTICATE_RESPONSE:
+        if (
+            response.type
+            == MessageType.AUTHENTICATE_RESPONSE
+        ):
             self.authenticated = bool(
                 response.payload.get(
                     "authenticated",
-                    False,
+                    response.payload.get(
+                        "status"
+                    )
+                        == "authenticated",
                 )
             )
 
@@ -154,18 +263,43 @@ class NodeClient:
         self,
         service_id: str,
         command: str,
-        requirements: Optional[dict[str, Any]] = None,
+        requirements: Optional[
+            dict[str, Any]
+        ] = None,
     ) -> BaseMessage:
         """Start a service on the remote Node."""
 
-        if not service_id:
+        if (
+            not isinstance(
+                service_id,
+                str,
+            )
+            or not service_id.strip()
+        ):
             raise ValueError(
                 "service_id is required"
             )
 
-        if not command:
+        if (
+            not isinstance(
+                command,
+                str,
+            )
+            or not command.strip()
+        ):
             raise ValueError(
                 "command is required"
+            )
+
+        if (
+            requirements is not None
+            and not isinstance(
+                requirements,
+                dict,
+            )
+        ):
+            raise TypeError(
+                "requirements must be a dictionary"
             )
 
         payload: dict[str, Any] = {
@@ -175,14 +309,18 @@ class NodeClient:
         }
 
         if requirements is not None:
-            payload["requirements"] = requirements
+            payload[
+                "requirements"
+            ] = requirements
 
         message = BaseMessage(
             type=MessageType.SERVICE_START,
             payload=payload,
         )
 
-        return await self.send(message)
+        return await self.send(
+            message
+        )
 
     async def stop_service(
         self,
@@ -190,7 +328,13 @@ class NodeClient:
     ) -> BaseMessage:
         """Stop a service on the remote Node."""
 
-        if not service_id:
+        if (
+            not isinstance(
+                service_id,
+                str,
+            )
+            or not service_id.strip()
+        ):
             raise ValueError(
                 "service_id is required"
             )
@@ -203,15 +347,23 @@ class NodeClient:
             },
         )
 
-        return await self.send(message)
+        return await self.send(
+            message
+        )
 
     async def get_service_status(
         self,
         service_id: str,
     ) -> BaseMessage:
-        """Get the status of a service."""
+        """Get service status."""
 
-        if not service_id:
+        if (
+            not isinstance(
+                service_id,
+                str,
+            )
+            or not service_id.strip()
+        ):
             raise ValueError(
                 "service_id is required"
             )
@@ -224,10 +376,14 @@ class NodeClient:
             },
         )
 
-        return await self.send(message)
+        return await self.send(
+            message
+        )
 
-    async def send_heartbeat(self) -> BaseMessage:
-        """Send a heartbeat to the remote Node."""
+    async def send_heartbeat(
+        self,
+    ) -> BaseMessage:
+        """Send a heartbeat."""
 
         message = BaseMessage(
             type=MessageType.HEARTBEAT,
@@ -236,10 +392,14 @@ class NodeClient:
             },
         )
 
-        return await self.send(message)
+        return await self.send(
+            message
+        )
 
-    async def request_resources(self) -> BaseMessage:
-        """Request the current resource report."""
+    async def request_resources(
+        self,
+    ) -> BaseMessage:
+        """Request current resource information."""
 
         message = BaseMessage(
             type=MessageType.RESOURCE_REPORT,
@@ -248,12 +408,16 @@ class NodeClient:
             },
         )
 
-        return await self.send(message)
+        return await self.send(
+            message
+        )
 
     async def send_command(
         self,
         message_type: MessageType,
-        payload: Optional[dict[str, Any]] = None,
+        payload: Optional[
+            dict[str, Any]
+        ] = None,
     ) -> BaseMessage:
         """Send a generic protocol command."""
 
@@ -265,6 +429,17 @@ class NodeClient:
                 "message_type must be a MessageType"
             )
 
+        if (
+            payload is not None
+            and not isinstance(
+                payload,
+                dict,
+            )
+        ):
+            raise TypeError(
+                "payload must be a dictionary"
+            )
+
         message = BaseMessage(
             type=message_type,
             payload={
@@ -273,9 +448,13 @@ class NodeClient:
             },
         )
 
-        return await self.send(message)
+        return await self.send(
+            message
+        )
 
-    async def __aenter__(self) -> "NodeClient":
+    async def __aenter__(
+        self,
+    ) -> "NodeClient":
         await self.connect()
         return self
 
