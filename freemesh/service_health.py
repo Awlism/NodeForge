@@ -13,7 +13,7 @@ from freemesh.service import (
 
 
 class ServiceHealthChecker:
-    """Check whether a NodeForge service is actually healthy."""
+    """Check actual runtime health of a service."""
 
     def __init__(
         self,
@@ -27,19 +27,23 @@ class ServiceHealthChecker:
         self,
         service: Service,
     ) -> ServiceHealth:
-        """Check the runtime health of a service."""
+        if not isinstance(
+            service,
+            Service,
+        ):
+            raise TypeError(
+                "service must be a Service instance"
+            )
 
         if service.status != ServiceStatus.RUNNING:
             if service.status == ServiceStatus.CRASHED:
                 service.health = (
                     ServiceHealth.CRASHED
                 )
-
             elif service.status == ServiceStatus.FAILED:
                 service.health = (
                     ServiceHealth.UNHEALTHY
                 )
-
             else:
                 service.health = (
                     ServiceHealth.UNKNOWN
@@ -76,15 +80,11 @@ class ServiceHealthChecker:
     def process_exists(
         pid: int,
     ) -> bool:
-        """Return whether a process with the given PID exists."""
-
-        if not isinstance(
-            pid,
-            int,
+        if (
+            not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
         ):
-            return False
-
-        if pid <= 0:
             return False
 
         try:
@@ -92,13 +92,10 @@ class ServiceHealthChecker:
                 pid,
                 0,
             )
-
         except ProcessLookupError:
             return False
-
         except PermissionError:
             return True
-
         except OSError:
             return False
 
@@ -108,20 +105,14 @@ class ServiceHealthChecker:
     def is_zombie(
         pid: int,
     ) -> bool:
-        """Return whether a Linux process is currently a zombie."""
-
-        if not isinstance(
-            pid,
-            int,
+        if (
+            not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
         ):
             return False
 
-        if pid <= 0:
-            return False
-
-        stat_path = (
-            f"/proc/{pid}/stat"
-        )
+        stat_path = f"/proc/{pid}/stat"
 
         try:
             with open(
@@ -149,22 +140,23 @@ class ServiceHealthChecker:
 
             return fields[0] == "Z"
 
-        except FileNotFoundError:
-            return False
-
-        except OSError:
+        except (
+            FileNotFoundError,
+            PermissionError,
+            OSError,
+        ):
             return False
 
     def check_pid(
         self,
         pid: Optional[int],
     ) -> bool:
-        """Return whether a PID represents a live process."""
-
         if pid is None:
             return False
 
-        if not self.process_exists(pid):
+        if not self.process_exists(
+            pid
+        ):
             return False
 
         if (
