@@ -1,5 +1,7 @@
 """Node agent for the NodeForge distributed system."""
 
+from __future__ import annotations
+
 import asyncio
 import socket
 import uuid
@@ -7,13 +9,25 @@ from enum import Enum
 from typing import Optional
 
 from freemesh.node.resources import collect_node_resources
-from freemesh.protocol.messages import BaseMessage, MessageType
+from freemesh.protocol.messages import (
+    BaseMessage,
+    MessageType,
+)
 from freemesh.protocol.transport import TCPTransport
 from freemesh.restart_engine import RestartEngine
-from freemesh.service import ServiceHealth, ServiceStatus
-from freemesh.service_health import ServiceHealthChecker
-from freemesh.service_manager import ServiceManager
-from freemesh.service_requirements import ServiceRequirements
+from freemesh.service import (
+    ServiceHealth,
+    ServiceStatus,
+)
+from freemesh.service_health import (
+    ServiceHealthChecker,
+)
+from freemesh.service_manager import (
+    ServiceManager,
+)
+from freemesh.service_requirements import (
+    ServiceRequirements,
+)
 
 
 class AgentState(str, Enum):
@@ -39,31 +53,69 @@ class NodeAgent:
         reconnect_delay_seconds: float = 5.0,
         heartbeat_interval_seconds: float = 5.0,
     ):
-        self.node_id = node_id or str(uuid.uuid4())
-        self.hostname = hostname or socket.gethostname()
-        self.controller_host = controller_host
-        self.controller_port = controller_port
-        self.authentication_token = authentication_token
+        if reconnect_delay_seconds <= 0:
+            raise ValueError(
+                "reconnect_delay_seconds must be positive"
+            )
+
+        if heartbeat_interval_seconds <= 0:
+            raise ValueError(
+                "heartbeat_interval_seconds must be positive"
+            )
+
+        self.node_id = (
+            node_id or str(uuid.uuid4())
+        )
+
+        self.hostname = (
+            hostname or socket.gethostname()
+        )
+
+        self.controller_host = (
+            controller_host
+        )
+
+        self.controller_port = (
+            controller_port
+        )
+
+        self.authentication_token = (
+            authentication_token
+        )
+
         self.reconnect_delay_seconds = (
             reconnect_delay_seconds
         )
+
         self.heartbeat_interval_seconds = (
             heartbeat_interval_seconds
         )
 
         self.state = AgentState.DISCONNECTED
+
         self.transport = TCPTransport()
 
         self._running = False
-        self._receive_task: Optional[asyncio.Task] = None
-        self._heartbeat_task: Optional[asyncio.Task] = None
-        self._service_monitor_task: Optional[asyncio.Task] = None
+
+        self._receive_task: Optional[
+            asyncio.Task
+        ] = None
+
+        self._heartbeat_task: Optional[
+            asyncio.Task
+        ] = None
+
+        self._service_monitor_task: Optional[
+            asyncio.Task
+        ] = None
 
         self._service_manager = ServiceManager(
             max_restart_attempts=3
         )
 
-        self._health_checker = ServiceHealthChecker()
+        self._health_checker = (
+            ServiceHealthChecker()
+        )
 
         self._restart_engine = RestartEngine(
             max_restart_attempts=3,
@@ -71,8 +123,10 @@ class NodeAgent:
             health_checker=self._health_checker,
         )
 
-    def _collect_resource_payload(self) -> dict:
-        """Collect current resource information for this node."""
+    def _collect_resource_payload(
+        self,
+    ) -> dict:
+        """Collect current resource information."""
 
         resources = collect_node_resources(
             running_services=len(
@@ -103,16 +157,49 @@ class NodeAgent:
             ),
         }
 
-    async def _send_resource_report(self) -> None:
-        """Send the current resource information to the Controller."""
+    async def _send_resource_report(
+        self,
+    ) -> None:
+        """Send current resource information."""
 
         resource_report = BaseMessage(
             type=MessageType.RESOURCE_REPORT,
             message_id=str(uuid.uuid4()),
-            payload=self._collect_resource_payload(),
+            payload=(
+                self._collect_resource_payload()
+            ),
         )
 
-        await self.transport.send(resource_report)
+        await self.transport.send(
+            resource_report
+        )
+
+    async def _cancel_tasks(
+        self,
+        tasks: list[Optional[asyncio.Task]],
+    ) -> None:
+        """Cancel and fully await agent background tasks."""
+
+        current = asyncio.current_task()
+
+        pending = [
+            task
+            for task in tasks
+            if (
+                task is not None
+                and task is not current
+                and not task.done()
+            )
+        ]
+
+        for task in pending:
+            task.cancel()
+
+        if pending:
+            await asyncio.gather(
+                *pending,
+                return_exceptions=True,
+            )
 
     async def start(self) -> None:
         """Start the node agent."""
@@ -122,93 +209,137 @@ class NodeAgent:
 
         self._running = True
 
-        while self._running:
-            try:
-                self.state = AgentState.CONNECTING
-
-                self.transport = TCPTransport()
-
-                await self.transport.connect(
-                    self.controller_host,
-                    self.controller_port,
-                )
-
-                await self._register_and_authenticate()
-
-                self.state = AgentState.READY
-
-                await self._send_resource_report()
-
-                self._receive_task = asyncio.create_task(
-                    self._receive_loop()
-                )
-
-                self._heartbeat_task = asyncio.create_task(
-                    self._heartbeat_loop()
-                )
-
-                self._service_monitor_task = (
-                    asyncio.create_task(
-                        self._service_monitor_loop()
+        try:
+            while self._running:
+                try:
+                    self.state = (
+                        AgentState.CONNECTING
                     )
-                )
 
-                done, pending = await asyncio.wait(
-                    [
+                    self.transport = TCPTransport()
+
+                    await self.transport.connect(
+                        self.controller_host,
+                        self.controller_port,
+                    )
+
+                    await self._register_and_authenticate()
+
+                    self.state = (
+                        AgentState.READY
+                    )
+
+                    await self._send_resource_report()
+
+                    self._receive_task = (
+                        asyncio.create_task(
+                            self._receive_loop()
+                        )
+                    )
+
+                    self._heartbeat_task = (
+                        asyncio.create_task(
+                            self._heartbeat_loop()
+                        )
+                    )
+
+                    self._service_monitor_task = (
+                        asyncio.create_task(
+                            self._service_monitor_loop()
+                        )
+                    )
+
+                    tasks = [
                         self._receive_task,
                         self._heartbeat_task,
                         self._service_monitor_task,
-                    ],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+                    ]
 
-                for task in pending:
-                    task.cancel()
+                    done, _ = await asyncio.wait(
+                        tasks,
+                        return_when=(
+                            asyncio.FIRST_COMPLETED
+                        ),
+                    )
 
-                for task in done:
-                    try:
-                        task.result()
-                    except asyncio.CancelledError:
-                        pass
+                    for task in done:
+                        try:
+                            task.result()
+                        except asyncio.CancelledError:
+                            pass
 
-            except asyncio.CancelledError:
-                break
+                    await self._cancel_tasks(
+                        tasks
+                    )
 
-            except Exception:
-                self.state = AgentState.ERROR
+                except asyncio.CancelledError:
+                    raise
 
-            finally:
-                await self.transport.disconnect()
+                except Exception:
+                    self.state = (
+                        AgentState.ERROR
+                    )
 
-                self._receive_task = None
-                self._heartbeat_task = None
-                self._service_monitor_task = None
+                finally:
+                    await self._cancel_tasks(
+                        [
+                            self._receive_task,
+                            self._heartbeat_task,
+                            self._service_monitor_task,
+                        ]
+                    )
 
-            if self._running:
-                self.state = AgentState.DISCONNECTED
+                    await self.transport.disconnect()
 
-                await asyncio.sleep(
-                    self.reconnect_delay_seconds
-                )
+                    self._receive_task = None
+                    self._heartbeat_task = None
+                    self._service_monitor_task = None
 
-        self.state = AgentState.DISCONNECTED
+                if self._running:
+                    self.state = (
+                        AgentState.DISCONNECTED
+                    )
+
+                    await asyncio.sleep(
+                        self.reconnect_delay_seconds
+                    )
+
+        finally:
+            self._running = False
+
+            await self._cancel_tasks(
+                [
+                    self._receive_task,
+                    self._heartbeat_task,
+                    self._service_monitor_task,
+                ]
+            )
+
+            await self.transport.disconnect()
+
+            self._receive_task = None
+            self._heartbeat_task = None
+            self._service_monitor_task = None
+
+            self.state = (
+                AgentState.DISCONNECTED
+            )
 
     async def stop(self) -> None:
         """Stop the node agent."""
 
         self._running = False
 
-        tasks = [
-            self._receive_task,
-            self._heartbeat_task,
-            self._service_monitor_task,
-        ]
-
-        for task in tasks:
-            if task is not None:
-                task.cancel()
+        await self._cancel_tasks(
+            [
+                self._receive_task,
+                self._heartbeat_task,
+                self._service_monitor_task,
+            ]
+        )
 
         await self._service_manager.stop_all()
+
         await self.transport.disconnect()
 
         self._receive_task = None
@@ -217,8 +348,10 @@ class NodeAgent:
 
         self.state = AgentState.DISCONNECTED
 
-    async def _register_and_authenticate(self) -> None:
-        """Register the node and authenticate with the controller."""
+    async def _register_and_authenticate(
+        self,
+    ) -> None:
+        """Register and authenticate with the Controller."""
 
         register_message = BaseMessage(
             type=MessageType.REGISTER,
@@ -226,21 +359,32 @@ class NodeAgent:
             payload={
                 "node_id": self.node_id,
                 "hostname": self.hostname,
-                "connection_address": self.controller_host,
-                "connection_port": self.controller_port,
+                "connection_address": (
+                    self.controller_host
+                ),
+                "connection_port": (
+                    self.controller_port
+                ),
             },
         )
 
-        await self.transport.send(register_message)
+        await self.transport.send(
+            register_message
+        )
 
-        register_response = await self.transport.receive()
+        register_response = (
+            await self.transport.receive()
+        )
 
         if register_response is None:
             raise ConnectionError(
                 "Controller closed connection during registration"
             )
 
-        if register_response.type == MessageType.ERROR:
+        if (
+            register_response.type
+            == MessageType.ERROR
+        ):
             raise ConnectionError(
                 register_response.payload.get(
                     "error",
@@ -248,12 +392,17 @@ class NodeAgent:
                 )
             )
 
-        if register_response.type != MessageType.REGISTER_RESPONSE:
+        if (
+            register_response.type
+            != MessageType.REGISTER_RESPONSE
+        ):
             raise ConnectionError(
                 "Unexpected registration response"
             )
 
-        self.state = AgentState.AUTHENTICATING
+        self.state = (
+            AgentState.AUTHENTICATING
+        )
 
         auth_message = BaseMessage(
             type=MessageType.AUTHENTICATE,
@@ -263,9 +412,13 @@ class NodeAgent:
             },
         )
 
-        await self.transport.send(auth_message)
+        await self.transport.send(
+            auth_message
+        )
 
-        auth_response = await self.transport.receive()
+        auth_response = (
+            await self.transport.receive()
+        )
 
         if auth_response is None:
             raise ConnectionError(
@@ -292,15 +445,20 @@ class NodeAgent:
             )
 
     async def _receive_loop(self) -> None:
-        """Receive messages from the controller."""
+        """Receive messages from the Controller."""
 
         while self._running:
-            message = await self.transport.receive()
+            message = (
+                await self.transport.receive()
+            )
 
             if message is None:
                 break
 
-            if message.type == MessageType.HEARTBEAT_RESPONSE:
+            if (
+                message.type
+                == MessageType.HEARTBEAT_RESPONSE
+            ):
                 continue
 
             if (
@@ -309,14 +467,29 @@ class NodeAgent:
             ):
                 continue
 
-            if message.type == MessageType.SERVICE_START:
-                await self._handle_service_start(message)
+            if (
+                message.type
+                == MessageType.SERVICE_START
+            ):
+                await self._handle_service_start(
+                    message
+                )
 
-            elif message.type == MessageType.SERVICE_STOP:
-                await self._handle_service_stop(message)
+            elif (
+                message.type
+                == MessageType.SERVICE_STOP
+            ):
+                await self._handle_service_stop(
+                    message
+                )
 
-            elif message.type == MessageType.SERVICE_STATUS:
-                await self._handle_service_status(message)
+            elif (
+                message.type
+                == MessageType.SERVICE_STATUS
+            ):
+                await self._handle_service_status(
+                    message
+                )
 
     async def _heartbeat_loop(self) -> None:
         """Send periodic heartbeats and resource reports."""
@@ -337,60 +510,70 @@ class NodeAgent:
                 },
             )
 
-            await self.transport.send(heartbeat)
-
-            resource_report = BaseMessage(
-                type=MessageType.RESOURCE_REPORT,
-                message_id=str(uuid.uuid4()),
-                payload=self._collect_resource_payload(),
+            await self.transport.send(
+                heartbeat
             )
 
-            await self.transport.send(resource_report)
+            await self._send_resource_report()
 
-    async def _service_monitor_loop(self) -> None:
+    async def _service_monitor_loop(
+        self,
+    ) -> None:
         """Monitor service health and restart crashed services."""
 
         while self._running:
             await asyncio.sleep(0.5)
 
-            for service in self._service_manager.list_services():
-                process = self._service_manager.get_process(
-                    service.service_id
+            for service in (
+                self._service_manager.list_services()
+            ):
+                if not self._running:
+                    break
+
+                process = (
+                    self._service_manager.get_process(
+                        service.service_id
+                    )
                 )
 
                 if process is None:
                     continue
 
                 if process.returncode is None:
-                    health = self._health_checker.check(
-                        service
+                    health = (
+                        self._health_checker.check(
+                            service
+                        )
                     )
 
-                    if health == ServiceHealth.HEALTHY:
+                    if (
+                        health
+                        == ServiceHealth.HEALTHY
+                    ):
                         continue
 
                 service.mark_crashed()
 
-                restarted = await self._restart_engine.restart(
-                    service=service,
-                    service_manager=self._service_manager,
-                    node_id=self.node_id,
+                restarted = (
+                    await self._restart_engine.restart(
+                        service=service,
+                        service_manager=(
+                            self._service_manager
+                        ),
+                        node_id=self.node_id,
+                    )
                 )
 
                 if restarted:
                     continue
 
-                # Restart attempts are exhausted.
-                #
-                # Keep the crashed service model available so STATUS
-                # requests can still report its terminal state.
-                # The Controller's migration fencing logic recognizes
-                # a crashed/failed process through its return code.
                 failure_message = BaseMessage(
                     type=MessageType.SERVICE_FAILURE,
                     message_id=str(uuid.uuid4()),
                     payload={
-                        "service_id": service.service_id,
+                        "service_id": (
+                            service.service_id
+                        ),
                         "node_id": self.node_id,
                         "command": service.command,
                         "status": (
@@ -405,7 +588,9 @@ class NodeAgent:
                         "requirements": (
                             service.requirements.to_dict()
                         ),
-                        "health": service.health.value,
+                        "health": (
+                            service.health.value
+                        ),
                         "error": (
                             "Maximum restart attempts reached"
                         ),
@@ -416,6 +601,8 @@ class NodeAgent:
                     await self.transport.send(
                         failure_message
                     )
+                except asyncio.CancelledError:
+                    raise
                 except Exception:
                     pass
 
@@ -427,16 +614,41 @@ class NodeAgent:
 
         payload = message.payload
 
-        service_id = payload.get("service_id")
-        command = payload.get("command")
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            return
+
+        service_id = payload.get(
+            "service_id"
+        )
+
+        command = payload.get(
+            "command"
+        )
+
         request_id = payload.get(
             "request_id",
             message.message_id,
         )
 
-        if not service_id or not command:
+        if (
+            not isinstance(
+                service_id,
+                str,
+            )
+            or not service_id.strip()
+            or not isinstance(
+                command,
+                str,
+            )
+            or not command.strip()
+        ):
             response = BaseMessage(
-                type=MessageType.SERVICE_START_RESPONSE,
+                type=(
+                    MessageType.SERVICE_START_RESPONSE
+                ),
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "failed",
@@ -447,13 +659,18 @@ class NodeAgent:
                 },
             )
 
-            await self.transport.send(response)
+            await self.transport.send(
+                response
+            )
+
             return
 
         try:
-            requirements_payload = payload.get(
-                "requirements",
-                {},
+            requirements_payload = (
+                payload.get(
+                    "requirements",
+                    {},
+                )
             )
 
             if requirements_payload is None:
@@ -480,15 +697,24 @@ class NodeAgent:
                 )
             )
 
-            service.requirements = requirements
-            service.node_id = self.node_id
+            service.requirements = (
+                requirements
+            )
+
+            service.node_id = (
+                self.node_id
+            )
 
             response = BaseMessage(
-                type=MessageType.SERVICE_START_RESPONSE,
+                type=(
+                    MessageType.SERVICE_START_RESPONSE
+                ),
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "started",
-                    "service_id": service.service_id,
+                    "service_id": (
+                        service.service_id
+                    ),
                     "node_id": self.node_id,
                     "command": service.command,
                     "pid": service.pid,
@@ -501,14 +727,21 @@ class NodeAgent:
                     "requirements": (
                         service.requirements.to_dict()
                     ),
-                    "health": service.health.value,
+                    "health": (
+                        service.health.value
+                    ),
                     "request_id": request_id,
                 },
             )
 
+        except asyncio.CancelledError:
+            raise
+
         except Exception as exc:
             response = BaseMessage(
-                type=MessageType.SERVICE_START_RESPONSE,
+                type=(
+                    MessageType.SERVICE_START_RESPONSE
+                ),
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "failed",
@@ -519,7 +752,9 @@ class NodeAgent:
                 },
             )
 
-        await self.transport.send(response)
+        await self.transport.send(
+            response
+        )
 
     async def _handle_service_stop(
         self,
@@ -529,24 +764,46 @@ class NodeAgent:
 
         payload = message.payload
 
-        service_id = payload.get("service_id")
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            return
+
+        service_id = payload.get(
+            "service_id"
+        )
+
         request_id = payload.get(
             "request_id",
             message.message_id,
         )
 
-        if not service_id:
+        if (
+            not isinstance(
+                service_id,
+                str,
+            )
+            or not service_id.strip()
+        ):
             response = BaseMessage(
-                type=MessageType.SERVICE_STOP_RESPONSE,
+                type=(
+                    MessageType.SERVICE_STOP_RESPONSE
+                ),
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "failed",
-                    "error": "service_id is required",
+                    "error": (
+                        "service_id is required"
+                    ),
                     "request_id": request_id,
                 },
             )
 
-            await self.transport.send(response)
+            await self.transport.send(
+                response
+            )
+
             return
 
         try:
@@ -557,19 +814,30 @@ class NodeAgent:
             )
 
             response = BaseMessage(
-                type=MessageType.SERVICE_STOP_RESPONSE,
+                type=(
+                    MessageType.SERVICE_STOP_RESPONSE
+                ),
                 message_id=str(uuid.uuid4()),
                 payload={
-                    "status": service.status.value,
-                    "service_id": service.service_id,
+                    "status": (
+                        service.status.value
+                    ),
+                    "service_id": (
+                        service.service_id
+                    ),
                     "node_id": self.node_id,
                     "request_id": request_id,
                 },
             )
 
+        except asyncio.CancelledError:
+            raise
+
         except Exception as exc:
             response = BaseMessage(
-                type=MessageType.SERVICE_STOP_RESPONSE,
+                type=(
+                    MessageType.SERVICE_STOP_RESPONSE
+                ),
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "failed",
@@ -580,7 +848,9 @@ class NodeAgent:
                 },
             )
 
-        await self.transport.send(response)
+        await self.transport.send(
+            response
+        )
 
     async def _handle_service_status(
         self,
@@ -590,27 +860,45 @@ class NodeAgent:
 
         payload = message.payload
 
-        service_id = payload.get("service_id")
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            return
+
+        service_id = payload.get(
+            "service_id"
+        )
+
         request_id = payload.get(
             "request_id",
             message.message_id,
         )
 
         service = (
-            self._service_manager.get_service(service_id)
+            self._service_manager.get_service(
+                service_id
+            )
             if service_id
             else None
         )
 
         process = (
-            self._service_manager.get_process(service_id)
+            self._service_manager.get_process(
+                service_id
+            )
             if service_id
             else None
         )
 
-        if service is None or process is None:
+        if (
+            service is None
+            or process is None
+        ):
             response = BaseMessage(
-                type=MessageType.SERVICE_STATUS_RESPONSE,
+                type=(
+                    MessageType.SERVICE_STATUS_RESPONSE
+                ),
                 message_id=str(uuid.uuid4()),
                 payload={
                     "status": "not_found",
@@ -620,7 +908,10 @@ class NodeAgent:
                 },
             )
 
-            await self.transport.send(response)
+            await self.transport.send(
+                response
+            )
+
             return
 
         if service.status not in (
@@ -633,20 +924,34 @@ class NodeAgent:
                     node_id=self.node_id,
                 )
 
-        self._health_checker.check(service)
+        self._health_checker.check(
+            service
+        )
 
         response = BaseMessage(
-            type=MessageType.SERVICE_STATUS_RESPONSE,
+            type=(
+                MessageType.SERVICE_STATUS_RESPONSE
+            ),
             message_id=str(uuid.uuid4()),
             payload={
-                "status": service.status.value,
-                "health": service.health.value,
-                "service_id": service.service_id,
+                "status": (
+                    service.status.value
+                ),
+                "health": (
+                    service.health.value
+                ),
+                "service_id": (
+                    service.service_id
+                ),
                 "node_id": self.node_id,
                 "command": service.command,
                 "pid": service.pid,
-                "returncode": process.returncode,
-                "restart_attempts": service.restart_attempts,
+                "returncode": (
+                    process.returncode
+                ),
+                "restart_attempts": (
+                    service.restart_attempts
+                ),
                 "max_restart_attempts": (
                     service.max_restart_attempts
                 ),
@@ -657,7 +962,9 @@ class NodeAgent:
             },
         )
 
-        await self.transport.send(response)
+        await self.transport.send(
+            response
+        )
 
     def get_state(self) -> AgentState:
         """Return the current agent state."""
