@@ -243,6 +243,42 @@ async def test_crash_failure_triggers_automatic_migration(
     counter_path = counter_file.name
     counter_file.close()
 
+    # Keep a copy of every failure recorded by FailureManager.
+    #
+    # The normal migration flow clears the failure record after
+    # successful migration, so checking get_failure() later can
+    # race with migration completion.
+    recorded_failures = []
+
+    original_record_failure = (
+        controller.failure_manager.record_failure
+    )
+
+    def capture_record_failure(
+        service_id,
+        node_id,
+        status="crashed",
+        reason=None,
+        restart_attempts=0,
+    ):
+        record = original_record_failure(
+            service_id=service_id,
+            node_id=node_id,
+            status=status,
+            reason=reason,
+            restart_attempts=restart_attempts,
+        )
+
+        recorded_failures.append(record)
+
+        return record
+
+    monkeypatch.setattr(
+        controller.failure_manager,
+        "record_failure",
+        capture_record_failure,
+    )
+
     try:
         await wait_until(
             lambda: (
@@ -371,20 +407,20 @@ async def test_crash_failure_triggers_automatic_migration(
 
             assert initial_pid is not None
 
-            # -------------------------------------------------
-            # IMPORTANT DEBUG POINT
+            # Wait for the failure to be recorded.
             #
-            # If SERVICE_FAILURE is never recorded, print the
-            # complete runtime state here instead of waiting
-            # silently for 30 seconds.
-            # -------------------------------------------------
+            # We intentionally do NOT use:
+            #
+            # controller.failure_manager.get_failure(...)
+            #
+            # because successful automatic migration clears that
+            # transient record before the test may observe it.
             try:
                 await wait_until(
-                    lambda: (
-                        controller.failure_manager.get_failure(
-                            "crash-migration-service"
-                        )
-                        is not None
+                    lambda: any(
+                        failure.service_id
+                        == "crash-migration-service"
+                        for failure in recorded_failures
                     ),
                     timeout=30.0,
                 )
@@ -402,35 +438,41 @@ async def test_crash_failure_triggers_automatic_migration(
                     node_b=node_b,
                 )
 
+                print(
+                    "Recorded failures:"
+                )
+
+                for recorded_failure in recorded_failures:
+                    print(
+                        f"  service_id={recorded_failure.service_id!r}, "
+                        f"node_id={recorded_failure.node_id!r}, "
+                        f"status={recorded_failure.status!r}, "
+                        f"restart_attempts="
+                        f"{recorded_failure.restart_attempts}, "
+                        f"reason={recorded_failure.reason!r}"
+                    )
+
                 raise
 
-            failure = (
-                controller.failure_manager.get_failure(
-                    "crash-migration-service"
-                )
+            failure = next(
+                failure
+                for failure in recorded_failures
+                if failure.service_id
+                == "crash-migration-service"
             )
 
-            assert failure is not None
+            assert failure.node_id == "crash-node-a"
 
-            assert (
-                failure.node_id
-                == "crash-node-a"
-            )
+            assert failure.status == "crashed"
 
-            assert (
-                failure.status
-                == "crashed"
-            )
-
-            assert (
-                failure.restart_attempts
-                == 3
-            )
+            assert failure.restart_attempts == 3
 
             service_id = (
                 "crash-migration-service"
             )
 
+            # Automatic migration should move the canonical
+            # service from Node A to Node B.
             try:
                 await wait_until(
                     lambda: (
