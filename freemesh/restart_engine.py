@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 
 from freemesh.service import Service, ServiceHealth
 from freemesh.service_health import ServiceHealthChecker
@@ -52,20 +53,56 @@ class RestartEngine:
             else ServiceHealthChecker()
         )
 
+    async def _spawn_process(
+        self,
+        command: str,
+    ) -> asyncio.subprocess.Process:
+        """Start a service without invoking a shell."""
+
+        ServiceManager.validate_command(
+            command
+        )
+
+        argv = shlex.split(command)
+
+        if not argv:
+            raise ValueError(
+                "command produced no executable"
+            )
+
+        return await asyncio.create_subprocess_exec(
+            *argv,
+        )
+
+    async def _terminate_process(
+        self,
+        process: asyncio.subprocess.Process,
+        timeout_seconds: float = 2.0,
+    ) -> None:
+        """Terminate a process and force-kill it if necessary."""
+
+        if process.returncode is not None:
+            return
+
+        process.terminate()
+
+        try:
+            await asyncio.wait_for(
+                process.wait(),
+                timeout=timeout_seconds,
+            )
+
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+
     async def restart(
         self,
         service: Service,
         service_manager: ServiceManager,
         node_id: str | None = None,
     ) -> bool:
-        """Restart a crashed service.
-
-        Returns True when the restarted service becomes
-        healthy.
-
-        Returns False when all restart attempts are
-        exhausted.
-        """
+        """Restart a crashed service."""
 
         if service.status.value not in {
             "crashed",
@@ -86,7 +123,7 @@ class RestartEngine:
                 self.backoff_seconds > 0
                 and service.restart_attempts > 0
             ):
-                await asyncio.sleep(
+                delay = (
                     self.backoff_seconds
                     * (
                         2
@@ -96,11 +133,15 @@ class RestartEngine:
                     )
                 )
 
+                await asyncio.sleep(
+                    delay
+                )
+
+            process = None
+
             try:
-                process = (
-                    await asyncio.create_subprocess_shell(
-                        service.command
-                    )
+                process = await self._spawn_process(
+                    service.command
                 )
 
                 service_manager._services[
@@ -114,10 +155,6 @@ class RestartEngine:
                     node_id=node_id,
                 )
 
-                # Give the process a short startup grace
-                # period so very short-lived failures are
-                # detected before declaring the restart
-                # successful.
                 if (
                     self.startup_grace_seconds > 0
                 ):
@@ -129,14 +166,16 @@ class RestartEngine:
                             ),
                         )
 
-                        # The process exited during the
-                        # startup grace period.
                         service.mark_crashed()
+
+                        service_manager._services.pop(
+                            service.service_id,
+                            None,
+                        )
 
                         continue
 
                     except asyncio.TimeoutError:
-                        # The process is still running.
                         pass
 
                 health = (
@@ -145,27 +184,50 @@ class RestartEngine:
                     )
                 )
 
-                if (
-                    health
-                    == ServiceHealth.HEALTHY
-                ):
+                if health == ServiceHealth.HEALTHY:
                     return True
 
-                if process.returncode is None:
-                    process.terminate()
+                await self._terminate_process(
+                    process
+                )
 
-                    try:
-                        await asyncio.wait_for(
-                            process.wait(),
-                            timeout=2.0,
-                        )
-                    except asyncio.TimeoutError:
-                        process.kill()
-                        await process.wait()
+                service_manager._services.pop(
+                    service.service_id,
+                    None,
+                )
 
                 service.mark_crashed()
 
+            except asyncio.CancelledError:
+                if process is not None:
+                    try:
+                        await self._terminate_process(
+                            process
+                        )
+                    except Exception:
+                        pass
+
+                service_manager._services.pop(
+                    service.service_id,
+                    None,
+                )
+
+                raise
+
             except Exception:
+                if process is not None:
+                    try:
+                        await self._terminate_process(
+                            process
+                        )
+                    except Exception:
+                        pass
+
+                service_manager._services.pop(
+                    service.service_id,
+                    None,
+                )
+
                 service.restart_attempts += 1
                 service.mark_failed()
 
