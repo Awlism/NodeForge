@@ -1,5 +1,7 @@
 """Transport layer for NodeForge protocol communication."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import struct
@@ -13,152 +15,332 @@ class Transport(ABC):
     """Abstract base class for transport implementations."""
 
     @abstractmethod
-    async def connect(self, host: str, port: int) -> None:
+    async def connect(
+        self,
+        host: str,
+        port: int,
+    ) -> None:
         """Connect to a remote endpoint."""
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     async def disconnect(self) -> None:
         """Disconnect from the remote endpoint."""
-        pass
+        raise NotImplementedError
 
     @abstractmethod
-    async def send(self, message: BaseMessage) -> None:
+    async def send(
+        self,
+        message: BaseMessage,
+    ) -> None:
         """Send a message to the remote endpoint."""
-        pass
+        raise NotImplementedError
 
     @abstractmethod
-    async def receive(self) -> Optional[BaseMessage]:
+    async def receive(
+        self,
+    ) -> Optional[BaseMessage]:
         """Receive a message from the remote endpoint."""
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     async def is_connected(self) -> bool:
         """Check if transport is currently connected."""
-        pass
+        raise NotImplementedError
 
 
 class TCPTransport(Transport):
-    """TCP transport with length-prefixed JSON messages."""
+    """TCP transport with bounded length-prefixed JSON messages."""
 
-    def __init__(self, host: str = "localhost", port: int = 9999):
-        """Initialize TCP transport.
+    DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
+    DEFAULT_MAX_MESSAGE_SIZE = 1024 * 1024
+    DEFAULT_SEND_TIMEOUT_SECONDS = 10.0
+    DEFAULT_RECEIVE_TIMEOUT_SECONDS = 30.0
 
-        Args:
-            host: Host to connect to or bind on
-            port: Port to connect to or bind on
-        """
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 9999,
+        *,
+        connect_timeout_seconds: float = (
+            DEFAULT_CONNECT_TIMEOUT_SECONDS
+        ),
+        max_message_size: int = (
+            DEFAULT_MAX_MESSAGE_SIZE
+        ),
+        send_timeout_seconds: float = (
+            DEFAULT_SEND_TIMEOUT_SECONDS
+        ),
+        receive_timeout_seconds: float = (
+            DEFAULT_RECEIVE_TIMEOUT_SECONDS
+        ),
+    ) -> None:
+        if connect_timeout_seconds <= 0:
+            raise ValueError(
+                "connect_timeout_seconds must be positive"
+            )
+
+        if max_message_size <= 0:
+            raise ValueError(
+                "max_message_size must be positive"
+            )
+
+        if send_timeout_seconds <= 0:
+            raise ValueError(
+                "send_timeout_seconds must be positive"
+            )
+
+        if receive_timeout_seconds <= 0:
+            raise ValueError(
+                "receive_timeout_seconds must be positive"
+            )
+
         self.host = host
         self.port = port
-        self.reader: Optional[asyncio.StreamReader] = None
-        self.writer: Optional[asyncio.StreamWriter] = None
 
-    async def connect(self, host: str, port: int) -> None:
-        """Connect to a remote TCP endpoint.
+        self.connect_timeout_seconds = (
+            connect_timeout_seconds
+        )
+        self.max_message_size = max_message_size
+        self.send_timeout_seconds = (
+            send_timeout_seconds
+        )
+        self.receive_timeout_seconds = (
+            receive_timeout_seconds
+        )
 
-        Args:
-            host: Remote host to connect to
-            port: Remote port to connect to
+        self.reader: Optional[
+            asyncio.StreamReader
+        ] = None
 
-        Raises:
-            ConnectionError: If connection fails
-        """
+        self.writer: Optional[
+            asyncio.StreamWriter
+        ] = None
+
+    async def connect(
+        self,
+        host: str,
+        port: int,
+    ) -> None:
+        """Connect to a remote TCP endpoint."""
+
         try:
-            self.reader, self.writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=10.0
+            self.reader, self.writer = (
+                await asyncio.wait_for(
+                    asyncio.open_connection(
+                        host,
+                        port,
+                    ),
+                    timeout=(
+                        self.connect_timeout_seconds
+                    ),
+                )
             )
-        except asyncio.TimeoutError as e:
-            raise ConnectionError(f"Connection timeout to {host}:{port}") from e
-        except OSError as e:
-            raise ConnectionError(f"Failed to connect to {host}:{port}: {e}") from e
+
+        except asyncio.TimeoutError as exc:
+            raise ConnectionError(
+                f"Connection timeout to "
+                f"{host}:{port}"
+            ) from exc
+
+        except OSError as exc:
+            raise ConnectionError(
+                f"Failed to connect to "
+                f"{host}:{port}: {exc}"
+            ) from exc
 
     async def disconnect(self) -> None:
         """Disconnect from the remote endpoint."""
-        if self.writer:
-            self.writer.close()
-            try:
-                await self.writer.wait_closed()
-            except Exception:
-                pass
+
+        writer = self.writer
+
         self.reader = None
         self.writer = None
 
-    async def send(self, message: BaseMessage) -> None:
-        """Send a message using length-prefixed JSON framing.
+        if writer is None:
+            return
 
-        Args:
-            message: Message to send
-
-        Raises:
-            ConnectionError: If not connected or send fails
-        """
-        if not self.writer:
-            raise ConnectionError("Transport is not connected")
+        writer.close()
 
         try:
-            # Serialize message to JSON
-            message_json = message.model_dump_json()
-            message_bytes = message_json.encode("utf-8")
+            await writer.wait_closed()
+        except Exception:
+            pass
 
-            # Create length-prefixed frame: 4-byte big-endian length + message
-            frame_length = struct.pack(">I", len(message_bytes))
-            frame = frame_length + message_bytes
+    async def send(
+        self,
+        message: BaseMessage,
+    ) -> None:
+        """Send a bounded length-prefixed JSON frame."""
 
-            # Send frame
-            self.writer.write(frame)
-            await self.writer.drain()
-        except (OSError, BrokenPipeError) as e:
-            raise ConnectionError(f"Failed to send message: {e}") from e
+        writer = self.writer
 
-    async def receive(self) -> Optional[BaseMessage]:
-        """Receive a message using length-prefixed JSON framing.
-
-        Args:
-            Returns:
-                Received BaseMessage or None if disconnected
-
-        Raises:
-            ValueError: If received message is invalid
-            ConnectionError: If receive fails
-        """
-        if not self.reader:
-            raise ConnectionError("Transport is not connected")
+        if writer is None:
+            raise ConnectionError(
+                "Transport is not connected"
+            )
 
         try:
-            # Read 4-byte length prefix
-            length_bytes = await self.reader.readexactly(4)
-            if not length_bytes:
-                return None
+            message_json = (
+                message.model_dump_json()
+            )
 
-            message_length = struct.unpack(">I", length_bytes)[0]
+            message_bytes = (
+                message_json.encode("utf-8")
+            )
 
-            # Validate message length
-            if message_length > 1024 * 1024:  # 1MB max
-                raise ValueError(f"Message length {message_length} exceeds maximum")
+            message_length = len(
+                message_bytes
+            )
 
-            # Read message body
-            message_bytes = await self.reader.readexactly(message_length)
+            if (
+                message_length
+                > self.max_message_size
+            ):
+                raise ValueError(
+                    "Message exceeds maximum "
+                    f"size of {self.max_message_size} bytes"
+                )
+
+            frame = (
+                struct.pack(
+                    ">I",
+                    message_length,
+                )
+                + message_bytes
+            )
+
+            writer.write(frame)
+
+            await asyncio.wait_for(
+                writer.drain(),
+                timeout=(
+                    self.send_timeout_seconds
+                ),
+            )
+
+        except asyncio.TimeoutError as exc:
+            raise ConnectionError(
+                "Timed out while sending message"
+            ) from exc
+
+        except ValueError:
+            raise
+
+        except (
+            OSError,
+            BrokenPipeError,
+        ) as exc:
+            raise ConnectionError(
+                f"Failed to send message: {exc}"
+            ) from exc
+
+    async def receive(
+        self,
+    ) -> Optional[BaseMessage]:
+        """Receive one bounded length-prefixed JSON frame."""
+
+        reader = self.reader
+
+        if reader is None:
+            raise ConnectionError(
+                "Transport is not connected"
+            )
+
+        try:
+            length_bytes = await asyncio.wait_for(
+                reader.readexactly(4),
+                timeout=(
+                    self.receive_timeout_seconds
+                ),
+            )
+
+            message_length = struct.unpack(
+                ">I",
+                length_bytes,
+            )[0]
+
+            if message_length <= 0:
+                raise ValueError(
+                    "Message length must be positive"
+                )
+
+            if (
+                message_length
+                > self.max_message_size
+            ):
+                raise ValueError(
+                    f"Message length "
+                    f"{message_length} exceeds "
+                    f"maximum of "
+                    f"{self.max_message_size}"
+                )
+
+            message_bytes = (
+                await asyncio.wait_for(
+                    reader.readexactly(
+                        message_length
+                    ),
+                    timeout=(
+                        self.receive_timeout_seconds
+                    ),
+                )
+            )
+
             if not message_bytes:
                 return None
 
-            # Deserialize JSON to BaseMessage
-            message_json = message_bytes.decode("utf-8")
-            message_dict = json.loads(message_json)
-            message = BaseMessage(**message_dict)
+            try:
+                message_json = (
+                    message_bytes.decode(
+                        "utf-8"
+                    )
+                )
 
-            return message
+                message_dict = json.loads(
+                    message_json
+                )
+
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise ValueError(
+                    "Invalid JSON message"
+                ) from exc
+
+            if not isinstance(
+                message_dict,
+                dict,
+            ):
+                raise ValueError(
+                    "Message payload must be a JSON object"
+                )
+
+            return BaseMessage(
+                **message_dict
+            )
+
         except asyncio.IncompleteReadError:
-            # Connection closed by remote
             return None
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in message: {e}") from e
-        except (OSError, asyncio.TimeoutError) as e:
-            raise ConnectionError(f"Failed to receive message: {e}") from e
+
+        except asyncio.TimeoutError as exc:
+            raise ConnectionError(
+                "Timed out while receiving message"
+            ) from exc
+
+        except ValueError:
+            raise
+
+        except OSError as exc:
+            raise ConnectionError(
+                f"Failed to receive message: {exc}"
+            ) from exc
 
     async def is_connected(self) -> bool:
-        """Check if transport is connected.
+        """Check if transport is currently connected."""
 
-        Returns:
-            True if connected, False otherwise
-        """
-        return self.writer is not None and self.reader is not None
+        return (
+            self.writer is not None
+            and self.reader is not None
+        )
