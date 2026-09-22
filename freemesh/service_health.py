@@ -15,66 +15,113 @@ from freemesh.service import (
 class ServiceHealthChecker:
     """Check whether a NodeForge service is actually healthy."""
 
-    def __init__(self, allow_zombie_process: bool = False) -> None:
-        self.allow_zombie_process = allow_zombie_process
+    def __init__(
+        self,
+        allow_zombie_process: bool = False,
+    ) -> None:
+        self.allow_zombie_process = (
+            allow_zombie_process
+        )
 
-    def check(self, service: Service) -> ServiceHealth:
+    def check(
+        self,
+        service: Service,
+    ) -> ServiceHealth:
         """Check the runtime health of a service."""
 
         if service.status != ServiceStatus.RUNNING:
             if service.status == ServiceStatus.CRASHED:
-                service.health = ServiceHealth.CRASHED
+                service.health = (
+                    ServiceHealth.CRASHED
+                )
+
             elif service.status == ServiceStatus.FAILED:
-                service.health = ServiceHealth.UNHEALTHY
+                service.health = (
+                    ServiceHealth.UNHEALTHY
+                )
+
             else:
-                service.health = ServiceHealth.UNKNOWN
+                service.health = (
+                    ServiceHealth.UNKNOWN
+                )
 
             return service.health
 
         if service.pid is None:
-            service.health = ServiceHealth.UNHEALTHY
+            service.health = (
+                ServiceHealth.UNHEALTHY
+            )
             return service.health
 
-        if not self.process_exists(service.pid):
+        if not self.process_exists(
+            service.pid
+        ):
             service.mark_crashed()
             return service.health
 
         if (
             not self.allow_zombie_process
-            and self.is_zombie(service.pid)
+            and self.is_zombie(
+                service.pid
+            )
         ):
             service.mark_crashed()
             return service.health
 
         service.mark_healthy()
+
         return service.health
 
     @staticmethod
-    def process_exists(pid: int) -> bool:
+    def process_exists(
+        pid: int,
+    ) -> bool:
         """Return whether a process with the given PID exists."""
+
+        if not isinstance(
+            pid,
+            int,
+        ):
+            return False
 
         if pid <= 0:
             return False
 
         try:
-            os.kill(pid, 0)
+            os.kill(
+                pid,
+                0,
+            )
+
         except ProcessLookupError:
             return False
+
         except PermissionError:
             return True
+
         except OSError:
             return False
 
         return True
 
     @staticmethod
-    def is_zombie(pid: int) -> bool:
+    def is_zombie(
+        pid: int,
+    ) -> bool:
         """Return whether a Linux process is currently a zombie."""
+
+        if not isinstance(
+            pid,
+            int,
+        ):
+            return False
 
         if pid <= 0:
             return False
 
-        stat_path = f"/proc/{pid}/stat"
+        stat_path = (
+            f"/proc/{pid}/stat"
+        )
 
         try:
             with open(
@@ -84,7 +131,9 @@ class ServiceHealthChecker:
             ) as file:
                 content = file.read()
 
-            closing_parenthesis = content.rfind(")")
+            closing_parenthesis = (
+                content.rfind(")")
+            )
 
             if closing_parenthesis == -1:
                 return False
@@ -98,12 +147,11 @@ class ServiceHealthChecker:
             if not fields:
                 return False
 
-            process_state = fields[0]
-
-            return process_state == "Z"
+            return fields[0] == "Z"
 
         except FileNotFoundError:
             return False
+
         except OSError:
             return False
 
