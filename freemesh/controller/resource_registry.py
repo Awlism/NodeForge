@@ -1,5 +1,7 @@
 """Persistent and freshness-aware resource registry."""
 
+from __future__ import annotations
+
 import sqlite3
 import time
 from typing import Dict, List, Optional
@@ -15,39 +17,70 @@ class ResourceRegistry:
         database_path: str = ":memory:",
         freshness_timeout_seconds: float = 30.0,
     ) -> None:
-        """Initialize the resource registry.
-
-        Args:
-            database_path:
-                SQLite database path.
-
-            freshness_timeout_seconds:
-                Maximum age in seconds for a resource report to be
-                considered fresh.
-        """
-
-        if freshness_timeout_seconds <= 0:
+        if (
+            not isinstance(
+                freshness_timeout_seconds,
+                (int, float),
+            )
+            or isinstance(
+                freshness_timeout_seconds,
+                bool,
+            )
+            or freshness_timeout_seconds <= 0
+        ):
             raise ValueError(
-                "freshness_timeout_seconds must be greater than 0"
+                "freshness_timeout_seconds "
+                "must be greater than 0"
             )
 
-        self._resources: Dict[str, NodeResources] = {}
-        self._resource_updated_at: Dict[str, float] = {}
+        self._resources: Dict[
+            str,
+            NodeResources,
+        ] = {}
+
+        self._resource_updated_at: Dict[
+            str,
+            float,
+        ] = {}
 
         self._database_path = database_path
         self._freshness_timeout_seconds = (
-            freshness_timeout_seconds
+            float(freshness_timeout_seconds)
         )
 
         self._connection = sqlite3.connect(
             database_path,
             timeout=30.0,
+            isolation_level=None,
         )
 
-        self._connection.row_factory = sqlite3.Row
+        self._connection.row_factory = (
+            sqlite3.Row
+        )
 
+        self._configure_database()
         self._create_tables()
         self._load_from_store()
+
+    def _configure_database(self) -> None:
+        """Configure SQLite for reliable resource persistence."""
+
+        self._connection.execute(
+            "PRAGMA busy_timeout = 30000"
+        )
+
+        self._connection.execute(
+            "PRAGMA foreign_keys = ON"
+        )
+
+        if self._database_path != ":memory:":
+            self._connection.execute(
+                "PRAGMA journal_mode = WAL"
+            )
+
+        self._connection.execute(
+            "PRAGMA synchronous = NORMAL"
+        )
 
     def _create_tables(self) -> None:
         """Create or migrate the persistent resource table."""
@@ -62,7 +95,8 @@ class ResourceRegistry:
                 memory_used_mb INTEGER NOT NULL,
                 disk_total_gb REAL NOT NULL,
                 disk_used_gb REAL NOT NULL,
-                running_services INTEGER NOT NULL
+                running_services INTEGER NOT NULL,
+                updated_at REAL
             )
             """
         )
@@ -95,15 +129,13 @@ class ResourceRegistry:
                 (0.0,),
             )
 
-        self._connection.commit()
-
     def _persist_resources(
         self,
         node_id: str,
         resources: NodeResources,
         updated_at: float,
     ) -> None:
-        """Persist resource information and its timestamp."""
+        """Persist resource information atomically."""
 
         self._connection.execute(
             """
@@ -149,8 +181,6 @@ class ResourceRegistry:
             ),
         )
 
-        self._connection.commit()
-
     def _load_from_store(self) -> None:
         """Load persisted resource information."""
 
@@ -173,7 +203,9 @@ class ResourceRegistry:
         for row in rows:
             node_id = row["node_id"]
 
-            self._resources[node_id] = NodeResources(
+            self._resources[
+                node_id
+            ] = NodeResources(
                 cpu_cores=row["cpu_cores"],
                 cpu_usage_percent=(
                     row["cpu_usage_percent"]
@@ -195,8 +227,10 @@ class ResourceRegistry:
                 ),
             )
 
-            self._resource_updated_at[node_id] = (
-                float(row["updated_at"] or 0.0)
+            self._resource_updated_at[
+                node_id
+            ] = float(
+                row["updated_at"] or 0.0
             )
 
     def _is_fresh(
@@ -204,10 +238,12 @@ class ResourceRegistry:
         node_id: str,
         now: Optional[float] = None,
     ) -> bool:
-        """Return whether a node's resource report is fresh."""
+        """Return whether a node resource report is fresh."""
 
-        updated_at = self._resource_updated_at.get(
-            node_id
+        updated_at = (
+            self._resource_updated_at.get(
+                node_id
+            )
         )
 
         if updated_at is None:
@@ -218,15 +254,15 @@ class ResourceRegistry:
 
         age = now - updated_at
 
-        return (
-            age <= self._freshness_timeout_seconds
+        return age <= (
+            self._freshness_timeout_seconds
         )
 
     def is_fresh(
         self,
         node_id: str,
     ) -> bool:
-        """Return whether a node's resources are currently fresh."""
+        """Return whether node resources are fresh."""
 
         if node_id not in self._resources:
             return False
@@ -237,10 +273,12 @@ class ResourceRegistry:
         self,
         node_id: str,
     ) -> Optional[float]:
-        """Return the age of a resource report in seconds."""
+        """Return resource report age."""
 
-        updated_at = self._resource_updated_at.get(
-            node_id
+        updated_at = (
+            self._resource_updated_at.get(
+                node_id
+            )
         )
 
         if updated_at is None:
@@ -256,9 +294,15 @@ class ResourceRegistry:
         node_id: str,
         resources: NodeResources,
     ) -> NodeResources:
-        """Register or replace resource information."""
+        """Register resource information."""
 
-        if not node_id:
+        if (
+            not isinstance(
+                node_id,
+                str,
+            )
+            or not node_id.strip()
+        ):
             raise ValueError(
                 "node_id is required"
             )
@@ -273,16 +317,19 @@ class ResourceRegistry:
 
         updated_at = time.time()
 
-        self._resources[node_id] = resources
-        self._resource_updated_at[node_id] = (
-            updated_at
-        )
-
         self._persist_resources(
             node_id,
             resources,
             updated_at,
         )
+
+        self._resources[
+            node_id
+        ] = resources
+
+        self._resource_updated_at[
+            node_id
+        ] = updated_at
 
         return resources
 
@@ -291,14 +338,7 @@ class ResourceRegistry:
         node_id: str,
         allow_stale: bool = False,
     ) -> Optional[NodeResources]:
-        """Return node resources.
-
-        By default only fresh resources are returned.
-
-        ``allow_stale=True`` is intended for inspection,
-        diagnostics, recovery, or persistence tests.
-        Scheduling should use the default behavior.
-        """
+        """Return node resources."""
 
         resources = self._resources.get(
             node_id
@@ -310,7 +350,9 @@ class ResourceRegistry:
         if allow_stale:
             return resources
 
-        if not self._is_fresh(node_id):
+        if not self._is_fresh(
+            node_id
+        ):
             return None
 
         return resources
@@ -320,7 +362,7 @@ class ResourceRegistry:
         node_id: str,
         resources: NodeResources,
     ) -> NodeResources:
-        """Update resource information for an existing node."""
+        """Update existing resource information."""
 
         if not node_id:
             raise ValueError(
@@ -342,16 +384,19 @@ class ResourceRegistry:
 
         updated_at = time.time()
 
-        self._resources[node_id] = resources
-        self._resource_updated_at[node_id] = (
-            updated_at
-        )
-
         self._persist_resources(
             node_id,
             resources,
             updated_at,
         )
+
+        self._resources[
+            node_id
+        ] = resources
+
+        self._resource_updated_at[
+            node_id
+        ] = updated_at
 
         return resources
 
@@ -359,7 +404,7 @@ class ResourceRegistry:
         self,
         node_id: str,
     ) -> Optional[NodeResources]:
-        """Remove resource information for a node."""
+        """Remove resource information."""
 
         resources = self._resources.pop(
             node_id,
@@ -380,21 +425,23 @@ class ResourceRegistry:
                 (node_id,),
             )
 
-            self._connection.commit()
-
         return resources
 
     def list_resources(
         self,
-    ) -> List[tuple[str, NodeResources]]:
+    ) -> List[
+        tuple[str, NodeResources]
+    ]:
         """Return all stored resource information."""
 
         return list(
             self._resources.items()
         )
 
-    def list_node_ids(self) -> List[str]:
-        """Return IDs of all nodes with resources."""
+    def list_node_ids(
+        self,
+    ) -> List[str]:
+        """Return all node IDs."""
 
         return list(
             self._resources.keys()
@@ -404,17 +451,21 @@ class ResourceRegistry:
         self,
         node_id: str,
     ) -> bool:
-        """Return whether stored resource information exists."""
+        """Return whether resource information exists."""
 
         return node_id in self._resources
 
-    def node_count(self) -> int:
-        """Return the number of nodes with resources."""
+    def node_count(
+        self,
+    ) -> int:
+        """Return number of resource records."""
 
-        return len(self._resources)
+        return len(
+            self._resources
+        )
 
     def clear(self) -> None:
-        """Remove all resources from memory and storage."""
+        """Remove all resources."""
 
         self._resources.clear()
         self._resource_updated_at.clear()
@@ -423,9 +474,7 @@ class ResourceRegistry:
             "DELETE FROM node_resources"
         )
 
-        self._connection.commit()
-
     def close(self) -> None:
-        """Close the SQLite connection."""
+        """Close SQLite."""
 
         self._connection.close()
