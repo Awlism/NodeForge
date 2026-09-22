@@ -22,6 +22,9 @@ from freemesh.controller.reconciler import (
 from freemesh.controller.service_orchestrator import (
     ServiceOrchestrator,
 )
+from freemesh.controller.service_lifecycle import (
+    ServiceLifecycleManager,
+)
 from freemesh.controller.resource_accounting import (
     ResourceAccounting,
 )
@@ -125,6 +128,10 @@ class Controller:
 
         self.service_orchestrator = ServiceOrchestrator(
             self
+        )
+
+        self.service_lifecycle = ServiceLifecycleManager(
+            self.service_orchestrator
         )
 
         self.failure_manager = FailureManager()
