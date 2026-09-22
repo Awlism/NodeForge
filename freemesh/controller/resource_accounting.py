@@ -1,5 +1,8 @@
 """Resource reservation and accounting for NodeForge."""
 
+from __future__ import annotations
+
+import math
 from dataclasses import dataclass
 from typing import Dict
 
@@ -24,6 +27,102 @@ class ResourceAccounting:
             ResourceReservation,
         ] = {}
 
+    @staticmethod
+    def _validate_service_id(
+        service_id: str,
+    ) -> None:
+        if (
+            not isinstance(
+                service_id,
+                str,
+            )
+            or not service_id.strip()
+        ):
+            raise ValueError(
+                "service_id is required"
+            )
+
+    @staticmethod
+    def _validate_node_id(
+        node_id: str,
+    ) -> None:
+        if (
+            not isinstance(
+                node_id,
+                str,
+            )
+            or not node_id.strip()
+        ):
+            raise ValueError(
+                "node_id is required"
+            )
+
+    @staticmethod
+    def _validate_cpu(
+        cpu_cores: float,
+    ) -> None:
+        if (
+            not isinstance(
+                cpu_cores,
+                (int, float),
+            )
+            or isinstance(
+                cpu_cores,
+                bool,
+            )
+            or not math.isfinite(
+                float(cpu_cores)
+            )
+            or cpu_cores < 0
+        ):
+            raise ValueError(
+                "cpu_cores must be a "
+                "finite non-negative number"
+            )
+
+    @staticmethod
+    def _validate_memory(
+        memory_mb: int,
+    ) -> None:
+        if (
+            not isinstance(
+                memory_mb,
+                int,
+            )
+            or isinstance(
+                memory_mb,
+                bool,
+            )
+            or memory_mb < 0
+        ):
+            raise ValueError(
+                "memory_mb must be a "
+                "non-negative integer"
+            )
+
+    @staticmethod
+    def _validate_disk(
+        disk_gb: float,
+    ) -> None:
+        if (
+            not isinstance(
+                disk_gb,
+                (int, float),
+            )
+            or isinstance(
+                disk_gb,
+                bool,
+            )
+            or not math.isfinite(
+                float(disk_gb)
+            )
+            or disk_gb < 0
+        ):
+            raise ValueError(
+                "disk_gb must be a "
+                "finite non-negative number"
+            )
+
     def reserve(
         self,
         service_id: str,
@@ -32,36 +131,39 @@ class ResourceAccounting:
         memory_mb: int = 0,
         disk_gb: float = 0.0,
     ) -> ResourceReservation:
-        if not service_id:
-            raise ValueError("service_id is required")
+        """Create or replace a service reservation."""
 
-        if not node_id:
-            raise ValueError("node_id is required")
+        self._validate_service_id(
+            service_id
+        )
 
-        if cpu_cores < 0:
-            raise ValueError(
-                "cpu_cores cannot be negative"
-            )
+        self._validate_node_id(
+            node_id
+        )
 
-        if memory_mb < 0:
-            raise ValueError(
-                "memory_mb cannot be negative"
-            )
+        self._validate_cpu(
+            cpu_cores
+        )
 
-        if disk_gb < 0:
-            raise ValueError(
-                "disk_gb cannot be negative"
-            )
+        self._validate_memory(
+            memory_mb
+        )
+
+        self._validate_disk(
+            disk_gb
+        )
 
         reservation = ResourceReservation(
             service_id=service_id,
             node_id=node_id,
-            cpu_cores=cpu_cores,
+            cpu_cores=float(cpu_cores),
             memory_mb=memory_mb,
-            disk_gb=disk_gb,
+            disk_gb=float(disk_gb),
         )
 
-        self._reservations[service_id] = reservation
+        self._reservations[
+            service_id
+        ] = reservation
 
         return reservation
 
@@ -69,12 +171,18 @@ class ResourceAccounting:
         self,
         service_id: str,
     ) -> ResourceReservation | None:
-        return self._reservations.get(service_id)
+        """Return a service reservation."""
+
+        return self._reservations.get(
+            service_id
+        )
 
     def release(
         self,
         service_id: str,
     ) -> ResourceReservation | None:
+        """Release a service reservation."""
+
         return self._reservations.pop(
             service_id,
             None,
@@ -85,6 +193,8 @@ class ResourceAccounting:
         service_id: str,
         target_node_id: str,
     ) -> ResourceReservation:
+        """Move an existing reservation to another node."""
+
         reservation = self._reservations.get(
             service_id
         )
@@ -94,10 +204,9 @@ class ResourceAccounting:
                 f"Reservation for {service_id} not found"
             )
 
-        if not target_node_id:
-            raise ValueError(
-                "target_node_id is required"
-            )
+        self._validate_node_id(
+            target_node_id
+        )
 
         moved = ResourceReservation(
             service_id=reservation.service_id,
@@ -107,13 +216,66 @@ class ResourceAccounting:
             disk_gb=reservation.disk_gb,
         )
 
-        self._reservations[service_id] = moved
+        self._reservations[
+            service_id
+        ] = moved
 
         return moved
+
+    def restore(
+        self,
+        reservations: list[
+            ResourceReservation
+        ],
+    ) -> None:
+        """Restore reservations after controller restart."""
+
+        restored: Dict[
+            str,
+            ResourceReservation,
+        ] = {}
+
+        for reservation in reservations:
+            self._validate_service_id(
+                reservation.service_id
+            )
+
+            self._validate_node_id(
+                reservation.node_id
+            )
+
+            self._validate_cpu(
+                reservation.cpu_cores
+            )
+
+            self._validate_memory(
+                reservation.memory_mb
+            )
+
+            self._validate_disk(
+                reservation.disk_gb
+            )
+
+            if (
+                reservation.service_id
+                in restored
+            ):
+                raise ValueError(
+                    "Duplicate service reservation: "
+                    f"{reservation.service_id}"
+                )
+
+            restored[
+                reservation.service_id
+            ] = reservation
+
+        self._reservations = restored
 
     def list_reservations(
         self,
     ) -> list[ResourceReservation]:
+        """Return all reservations."""
+
         return list(
             self._reservations.values()
         )
@@ -122,9 +284,17 @@ class ResourceAccounting:
         self,
         node_id: str,
     ) -> list[ResourceReservation]:
+        """Return reservations belonging to a node."""
+
+        self._validate_node_id(
+            node_id
+        )
+
         return [
             reservation
-            for reservation in self._reservations.values()
+            for reservation in (
+                self._reservations.values()
+            )
             if reservation.node_id == node_id
         ]
 
@@ -132,8 +302,12 @@ class ResourceAccounting:
         self,
         node_id: str,
     ) -> dict[str, float | int]:
-        reservations = self.list_node_reservations(
-            node_id
+        """Return reserved resources for a node."""
+
+        reservations = (
+            self.list_node_reservations(
+                node_id
+            )
         )
 
         return {
@@ -155,12 +329,22 @@ class ResourceAccounting:
         self,
         node_id: str | None = None,
     ) -> int:
+        """Return total or per-node reservation count."""
+
         if node_id is None:
-            return len(self._reservations)
+            return len(
+                self._reservations
+            )
 
         return len(
-            self.list_node_reservations(node_id)
+            self.list_node_reservations(
+                node_id
+            )
         )
 
-    def clear(self) -> None:
+    def clear(
+        self,
+    ) -> None:
+        """Clear all reservations."""
+
         self._reservations.clear()
